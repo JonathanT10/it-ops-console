@@ -1,0 +1,124 @@
+{
+  "GeneratedUtc": "2026-08-31T16:24:06Z",
+  "StaleDays": 90,
+  "MfaCoverage": {
+    "EnabledMembersInReport": 183,
+    "MfaRegistered": 171,
+    "NotRegistered": 12,
+    "CoveragePercent": 93.4
+  },
+  "RoleSummary": [
+    {
+      "Role": "Global Administrator",
+      "Assignments": 4
+    },
+    {
+      "Role": "Exchange Administrator",
+      "Assignments": 3
+    },
+    {
+      "Role": "Helpdesk Administrator",
+      "Assignments": 3
+    },
+    {
+      "Role": "Intune Administrator",
+      "Assignments": 2
+    },
+    {
+      "Role": "Security Administrator",
+      "Assignments": 2
+    },
+    {
+      "Role": "Directory Synchronization Accounts",
+      "Assignments": 2
+    }
+  ],
+  "AdminsWithoutMfa": [
+    {
+      "DisplayName": "Directory Sync Service Account",
+      "UserPrincipalName": "Sync_DC01_a1b2c3@contoso.onmicrosoft.com",
+      "Roles": "Directory Synchronization Accounts"
+    },
+    {
+      "DisplayName": "Reporting Service",
+      "UserPrincipalName": "svc-reporting@contoso.com",
+      "Roles": "Reports Reader"
+    }
+  ],
+  "StaleMembers": [
+    {
+      "DisplayName": "Conference Room 2",
+      "UserPrincipalName": "room2@contoso.com",
+      "LastSignIn": null,
+      "Created": "2023-04-02T00:00:00Z"
+    },
+    {
+      "DisplayName": "Ana Ruiz",
+      "UserPrincipalName": "ana.ruiz@contoso.com",
+      "LastSignIn": "2026-02-02T21:24:06Z",
+      "Created": "2022-01-10T00:00:00Z"
+    },
+    {
+      "DisplayName": "Legacy Scanner",
+      "UserPrincipalName": "scanner@contoso.com",
+      "LastSignIn": "2026-04-13T21:24:06Z",
+      "Created": "2021-06-01T00:00:00Z"
+    },
+    {
+      "DisplayName": "Tom Baird",
+      "UserPrincipalName": "tom.baird@contoso.com",
+      "LastSignIn": "2026-05-08T21:24:06Z",
+      "Created": "2020-03-03T00:00:00Z"
+    }
+  ],
+  "Guests": {
+    "Total": 24,
+    "Stale": [
+      {
+        "DisplayName": "Partner A"
+      },
+      {
+        "DisplayName": "Partner B"
+      },
+      {
+        "DisplayName": "Partner C"
+      }
+    ],
+    "PendingAcceptance": [
+      {
+        "displayName": "Vendor X"
+      },
+      {
+        "displayName": "Vendor Y"
+      }
+    ]
+  },
+  "LegacyAuth": {
+    "Available": true,
+    "Summary": [
+      {
+        "ClientApp": "Authenticated SMTP",
+        "SignIns": 58,
+        "DistinctUsers": 5
+      },
+      {
+        "ClientApp": "Other clients",
+        "SignIns": 17,
+        "DistinctUsers": 3
+      }
+    ],
+    "Users": [
+      {
+        "UserPrincipalName": "scanner@contoso.com",
+        "ClientApp": "Authenticated SMTP",
+        "AppDisplayName": "MFP Scan to Email"
+      },
+      {
+        "UserPrincipalName": "billing@contoso.com",
+        "ClientApp": "Other clients",
+        "AppDisplayName": "Billing Export"
+      }
+    ]
+  },
+  "NeedsAttention": []
+}

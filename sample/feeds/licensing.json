@@ -1,0 +1,100 @@
+{
+  "GeneratedUtc": "2026-08-29T21:24:06Z",
+  "StaleDays": 90,
+  "LicensedUsers": 187,
+  "SkuSummary": [
+    {
+      "Sku": "SPB",
+      "Purchased": 188,
+      "Assigned": 181,
+      "Unassigned": 7,
+      "SuspendedOrWarning": 0,
+      "IsConsumption": false
+    },
+    {
+      "Sku": "AAD_PREMIUM_P2",
+      "Purchased": 25,
+      "Assigned": 10,
+      "Unassigned": 15,
+      "SuspendedOrWarning": 0,
+      "IsConsumption": false
+    },
+    {
+      "Sku": "VISIOCLIENT",
+      "Purchased": 9,
+      "Assigned": 7,
+      "Unassigned": 2,
+      "SuspendedOrWarning": 0,
+      "IsConsumption": false
+    },
+    {
+      "Sku": "EXCHANGEENTERPRISE",
+      "Purchased": 9,
+      "Assigned": 9,
+      "Unassigned": 0,
+      "SuspendedOrWarning": 0,
+      "IsConsumption": false
+    },
+    {
+      "Sku": "UNIVERSAL_PRINT",
+      "Purchased": 5,
+      "Assigned": 3,
+      "Unassigned": 2,
+      "SuspendedOrWarning": 0,
+      "IsConsumption": false
+    }
+  ],
+  "ConsumptionSkus": [
+    {
+      "Sku": "FLOW_FREE",
+      "Purchased": 10000,
+      "Assigned": 187,
+      "Unassigned": 9813,
+      "IsConsumption": true
+    },
+    {
+      "Sku": "POWERAPPS_DEV",
+      "Purchased": 10000,
+      "Assigned": 140,
+      "Unassigned": 9860,
+      "IsConsumption": true
+    },
+    {
+      "Sku": "MCOPSTNC",
+      "Purchased": 10000000,
+      "Assigned": 0,
+      "Unassigned": 10000000,
+      "IsConsumption": true
+    }
+  ],
+  "ReclaimCandidates": [
+    {
+      "Reason": "DISABLED ACCOUNT",
+      "DisplayName": "Ellis Frank",
+      "UserPrincipalName": "ellis.frank@contoso.com",
+      "LastSignIn": "2025-11-04T21:24:06Z",
+      "Licenses": "SPB; VISIOCLIENT"
+    },
+    {
+      "Reason": "STALE (> 90 days)",
+      "DisplayName": "Ana Ruiz",
+      "UserPrincipalName": "ana.ruiz@contoso.com",
+      "LastSignIn": "2026-02-02T21:24:06Z",
+      "Licenses": "SPB"
+    },
+    {
+      "Reason": "NEVER SIGNED IN",
+      "DisplayName": "Conference Room 2",
+      "UserPrincipalName": "room2@contoso.com",
+      "LastSignIn": null,
+      "Licenses": "SPB"
+    },
+    {
+      "Reason": "STALE (> 90 days)",
+      "DisplayName": "Tom Baird",
+      "UserPrincipalName": "tom.baird@contoso.com",
+      "LastSignIn": "2026-05-08T21:24:06Z",
+      "Licenses": "SPB; AAD_PREMIUM_P2"
+    }
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "GeneratedUtc": "2026-08-31T18:26:42Z",
+  "Tenant": {
+    "Name": "Northwind Traders",
+    "Id": "11111111-2222-3333-4444-555555555555"
+  },
+  "SnapshotCount": 7,
+  "Kpis": {
+    "Members": 195,
+    "EnabledMembers": 183,
+    "Guests": 24,
+    "CaEnabled": 2,
+    "CaTotal": 4,
+    "RoleAssignments": 6,
+    "Groups": 4,
+    "AppRegistrations": 4,
+    "CredsInWindow": 3,
+    "CredsExpired": 1,
+    "CaGapsCritical": 0,
+    "CaGapsWarning": 2,
+    "EnrolledDevices": 84,
+    "NonCompliantDevices": 4
+  },
+  "NewChanges": [],
+  "CaGaps": [
+    {
+      "Id": "mfa-all-users",
+      "Title": "MFA required for all users",
+      "Severity": "critical",
+      "Result": "pass",
+      "Detail": "satisfied by 'Require MFA for all users'"
+    },
+    {
+      "Id": "block-legacy-auth",
+      "Title": "Legacy authentication blocked",
+      "Severity": "critical",
+      "Result": "pass",
+      "Detail": "satisfied by 'Block legacy authentication'"
+    },
+    {
+      "Id": "admin-mfa",
+      "Title": "Admin roles require MFA",
+      "Severity": "critical",
+      "Result": "pass",
+      "Detail": "covered by the all-users policy 'Require MFA for all users'"
+    },
+    {
+      "Id": "baseline-exists",
+      "Title": "Conditional Access is enforced",
+      "Severity": "critical",
+      "Result": "pass",
+      "Detail": "2 enabled policies"
+    },
+    {
+      "Id": "breakglass-exclusion",
+      "Title": "Break-glass accounts excluded",
+      "Severity": "warning",
+      "Result": "fail",
+      "Detail": "no exclusions on: Block legacy authentication - lockout risk"
+    },
+    {
+      "Id": "guest-protection",
+      "Title": "Guests covered by MFA or block",
+      "Severity": "warning",
+      "Result": "pass",
+      "Detail": "satisfied by 'Block legacy authentication'"
+    },
+    {
+      "Id": "risk-policies",
+      "Title": "Risk-based policies in use",
+      "Severity": "info",
+      "Result": "fail",
+      "Detail": "no enabled policy uses sign-in or user risk (Entra ID P2 feature)"
+    },
+    {
+      "Id": "device-grants",
+      "Title": "Device compliance used in grants",
+      "Severity": "info",
+      "Result": "fail",
+      "Detail": "no enabled policy requires a compliant or hybrid-joined device"
+    },
+    {
+      "Id": "report-only-lingering",
+      "Title": "No lingering report-only policies",
+      "Severity": "warning",
+      "Result": "fail",
+      "Detail": "report-only: Require phishing-resistant MFA for admins - enforce or remove"
+    },
+    {
+      "Id": "unused-locations",
+      "Title": "Named locations all referenced",
+      "Severity": "info",
+      "Result": "fail",
+      "Detail": "unused: HQ egress"
+    }
+  ]
+}
