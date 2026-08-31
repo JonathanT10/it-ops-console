@@ -202,20 +202,30 @@ def load_all(config_path):
     so the console can render honestly around it."""
     cfg = configparser.ConfigParser()
     cfg.optionxform = str
-    if not cfg.read(config_path):
+    # utf-8-sig: Windows PowerShell 5.1's Set-Content -Encoding UTF8 writes a
+    # BOM, and setup.ps1 writes this file. Without it, configparser sees the
+    # BOM as text glued to line 1 and fails with "no section headers".
+    if not cfg.read(config_path, encoding="utf-8-sig"):
         raise SystemExit("Config not found: %s (copy sources.example.ini)" % config_path)
 
     # Relative paths are resolved against the config file's own folder, not the
     # current directory, so the console builds the same from anywhere - which
     # matters when a scheduled task runs it from C:\Windows\System32.
     cfg_dir = os.path.dirname(os.path.abspath(config_path))
-    base = cfg.get("console", "base_path", fallback="").strip()
+
+    def _norm(p):
+        # Configs written on Windows use backslashes. On POSIX a backslash is
+        # an ordinary filename character, so a copied config fails with paths
+        # that LOOK right in the error message - normalize instead.
+        return p.replace("\\", os.sep) if os.sep == "/" else p
+
+    base = _norm(cfg.get("console", "base_path", fallback="").strip())
     if base and not os.path.isabs(base):
         base = os.path.join(cfg_dir, base)
 
     feeds = {}
     for key, (label, loader) in LOADERS.items():
-        raw = cfg.get("sources", key, fallback="").strip()
+        raw = _norm(cfg.get("sources", key, fallback="").strip())
         if not raw:
             feeds[key] = Feed(key, label, None, error=None)
             continue
