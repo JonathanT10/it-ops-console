@@ -79,7 +79,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Set-StrictMode -Version Latest
+# Deliberately NO Set-StrictMode here. Strict mode inherits into every script
+# this wrapper invokes with '&', and it changes their semantics: the collectors
+# read optional Graph response properties (a missing '@odata.nextLink' is how
+# paging ENDS), which strict mode turns from "null" into a terminating error.
+# A wrapper must not alter the behaviour of the things it wraps.
 
 if (-not $ToolRoot)   { $ToolRoot   = Split-Path -Parent $PSScriptRoot }
 if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'sources.ini' }
@@ -253,9 +257,14 @@ Write-Host ''
 
 $failed  = @($results.ToArray() | Where-Object { $_.Status -eq 'FAILED' })
 $missing = @($results.ToArray() | Where-Object { $_.Status -eq 'missing' })
+$consoleFailed = @($failed | Where-Object { $_.Step -eq 'console build' }).Count -gt 0
 
 if ($failed.Count -or $missing.Count) {
-    Write-Warning ("{0} step(s) did not complete. The console was still built - the feeds those steps produce will show their real age." -f ($failed.Count + $missing.Count))
+    if ($consoleFailed) {
+        Write-Warning ("{0} step(s) did not complete, including the console build itself - the console was NOT rebuilt this run; whatever site existed before is unchanged." -f ($failed.Count + $missing.Count))
+    } else {
+        Write-Warning ("{0} step(s) did not complete. The console was still built - the feeds those steps produce will show their real age." -f ($failed.Count + $missing.Count))
+    }
     exit 1
 }
 

@@ -71,7 +71,26 @@ The builder also prints a feed table and a warning when anything has gone stale,
 so a scheduled build tells you in its own log that a collector has stopped
 running.
 
-## Setup
+## The easy way — one script, no git, no editing configs
+
+For the admin who wants the console without assembling it: download
+[`setup.ps1`](setup.ps1), then right-click it → **Run with PowerShell** (or run
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1`). It creates
+`C:\IT-Ops`, downloads all five tools, installs the Graph modules, checks for
+Python and offers to install it, writes a `sources.ini` where everything
+already points at everything else, and puts two shortcuts on your desktop:
+
+- **Refresh IT Ops Data** — runs every collector (you sign in when asked),
+  then rebuilds the console. Double-click it on whatever rhythm suits you.
+- **IT Ops Console** — opens the result in your browser.
+
+Nothing stores a password: collection is read-only and you sign in
+interactively each refresh. Works in Windows PowerShell 5.1 — the one
+"right-click → Run with PowerShell" actually launches — as well as
+PowerShell 7. Printers are optional; add their IPs to
+`tools\print-fleet-dashboard\config.ini` whenever you get to it.
+
+## Setup by hand
 
 Python 3.8 or newer. No third-party packages — standard library only.
 
@@ -93,7 +112,9 @@ python build.py --config sources.ini --out C:\it-ops\console-site
 
 Relative paths in `sources.ini` resolve against the config file's own folder,
 not the current directory, so a scheduled task that starts in
-`C:\Windows\System32` builds exactly the same site you get by hand.
+`C:\Windows\System32` builds exactly the same site you get by hand. Backslash
+separators in a config are normalized on Linux and macOS, so a `sources.ini`
+written on Windows still loads there.
 
 ## Running everything in one go
 
@@ -175,7 +196,7 @@ last week's build against today's shows you real drift and not churn.
 python tests/test_console.py
 ```
 
-54 checks covering freshness classification, timestamp parsing, feed
+55 checks covering freshness classification, timestamp parsing, feed
 degradation (corrupt JSON, missing files, unconfigured sources), every model,
 change detection, rendering with zero feeds configured, HTML escaping of
 hostile input, and a full sample build.
