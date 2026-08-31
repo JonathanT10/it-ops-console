@@ -1,5 +1,7 @@
-# Your own feed config - sources.example.ini is the template
-sources.ini
+# Your own feed config - sources.example.ini is the template.
+# Anchored to the repo root on purpose: an unanchored "sources.ini" would also
+# swallow sample/sources.ini, which the bundled demo build needs.
+/sources.ini
 
 # Built output
 console-site/
