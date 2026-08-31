@@ -97,6 +97,31 @@ def test_loading(tmp):
           and feeds["fleet"].status_note == "not configured")
     check("load: timestamp picked up from payload", feeds["tenant"].state == "fresh")
 
+    # A config written on Windows (backslash separators) must load on POSIX -
+    # setup.ps1 writes exactly this shape and the console claims plain Python.
+    win_cfg = os.path.join(tmp, "sources-win.ini")
+    with open(win_cfg, "w") as fh:
+        fh.write("[console]\nbase_path = %s\n\n[sources]\n"
+                 "tenant = sub\\tenant.json\nsecurity =\nlicensing =\n"
+                 "fleet =\nhistory =\nrun_summary =\n" % feeds_dir)
+    os.makedirs(os.path.join(feeds_dir, "sub"), exist_ok=True)
+    with open(os.path.join(feeds_dir, "sub", "tenant.json"), "w") as fh:
+        json.dump(good, fh)
+    _cfg2, feeds2 = load_all(win_cfg)
+    check("load: windows-style backslash paths load on posix", feeds2["tenant"].ok)
+
+    # Windows PowerShell 5.1's Set-Content -Encoding UTF8 writes a BOM, and
+    # setup.ps1 writes sources.ini exactly that way. configparser must not
+    # choke on it.
+    bom_cfg = os.path.join(tmp, "sources-bom.ini")
+    with open(bom_cfg, "wb") as fh:
+        fh.write(b"\xef\xbb\xbf")
+        fh.write(("[console]\nbase_path = %s\n\n[sources]\n"
+                  "tenant = tenant.json\nsecurity =\nlicensing =\n"
+                  "fleet =\nhistory =\nrun_summary =\n" % feeds_dir).encode("utf-8"))
+    _cfg3, feeds3 = load_all(bom_cfg)
+    check("load: a BOM'd config (PowerShell 5.1 Set-Content) loads", feeds3["tenant"].ok)
+
 
 # --------------------------------------------------------------------------- #
 # Models
