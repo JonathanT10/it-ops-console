@@ -1,0 +1,7 @@
+# Your own feed config - sources.example.ini is the template
+sources.ini
+
+# Built output
+console-site/
+*.pyc
+__pycache__/
