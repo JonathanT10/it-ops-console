@@ -7,3 +7,7 @@
 console-site/
 *.pyc
 __pycache__/
+
+# Runtime logs the scripts write beside themselves
+setup.log
+check-setup.log
