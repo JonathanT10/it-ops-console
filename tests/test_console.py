@@ -184,6 +184,65 @@ def test_licensing_model():
     check("licensing: SKUs sorted by waste", m["skus"][0]["Sku"] == "B")
     check("licensing: disabled split out", len(m["disabled_holders"]) == 1)
     check("licensing: stale+never grouped", len(m["stale_holders"]) == 2)
+    check("licensing: no costing when tool omitted it", m["costing"] is None)
+
+
+def _licensing_feed(costing=None, extra_sku=None):
+    sku = {"Sku": "SPB", "Purchased": 100, "Assigned": 80, "Unassigned": 20}
+    if extra_sku:
+        sku.update(extra_sku)
+    data = {
+        "GeneratedUtc": iso(NOW), "StaleDays": 90, "LicensedUsers": 80,
+        "SkuSummary": [sku],
+        "ConsumptionSkus": [],
+        "ReclaimCandidates": [
+            {"Reason": "DISABLED ACCOUNT", "DisplayName": "Dee", "UserPrincipalName": "d@x",
+             "Licenses": "SPB", "MonthlyCost": 33.0 if costing else None}],
+    }
+    if costing is not None:
+        data["Costing"] = costing
+    return Feed("licensing", "Licensing", "x", data=data, ts=NOW)
+
+
+def test_licensing_costing_render():
+    avail = {k: False for k in ("index", "identity", "security", "licensing", "fleet", "changes")}
+    avail["licensing"] = True
+    gen = "2026-01-01 00:00:00"
+
+    # Priced: dollars lead on the page and the overview tile.
+    costing = {"Currency": "$", "HasPrices": True, "PricedSkuCount": 1,
+               "UnpricedSkuCount": 1, "UnpricedSkus": ["VISIOCLIENT"],
+               "UnusedSeatsMonthly": 660.0, "UnusedSeatsAnnual": 7920.0,
+               "ReclaimableMonthly": 33.0, "ReclaimableAnnual": 396.0}
+    feed = _licensing_feed(costing, extra_sku={"MonthlyPrice": 33.0, "UnusedMonthlyCost": 660.0})
+    m = model.licensing_model(feed)
+    page = pages.build_licensing(m, feed, avail, gen)
+    check("costing: annual unused dollars on page", "$7,920" in page)
+    check("costing: reclaimable dollars on page", "$396" in page)
+    check("costing: $/mo column present", "$/mo unused" in page)
+    check("costing: unpriced SKU nudge names the SKU", "VISIOCLIENT" in page and "no price yet" in page)
+    ov = pages.build_overview({"licensing": m, "identity": None, "security": None,
+                               "fleet": None, "changes": None},
+                              {"licensing": feed, "tenant": feed, "security": feed,
+                               "history": feed, "fleet": feed}, avail, gen)
+    check("costing: overview tile leads with dollars", "$7,920" in ov)
+
+    # Price file present but empty: nudge to fill it, no dollar figures.
+    empty = {"Currency": "$", "HasPrices": False, "PricedSkuCount": 0,
+             "UnpricedSkuCount": 1, "UnpricedSkus": ["SPB"],
+             "UnusedSeatsMonthly": 0, "UnusedSeatsAnnual": 0,
+             "ReclaimableMonthly": 0, "ReclaimableAnnual": 0}
+    fe = _licensing_feed(empty)
+    pe = pages.build_licensing(model.licensing_model(fe), fe, avail, gen)
+    check("costing: empty price file nudges to add prices", "add per-seat prices there and refresh" in pe.lower()
+          or "type a per-seat price" in pe.lower())
+    check("costing: empty price file shows no annual dollar card", "/ year</div>" not in pe or "$0" in pe)
+
+    # No costing at all: seat-count view, first-run hint, no crash.
+    fn = _licensing_feed(None)
+    pn = pages.build_licensing(model.licensing_model(fn), fn, avail, gen)
+    check("costing: no-costing page still renders seats", "#Unassigned" in pn or "Unassigned" in pn)
+    check("costing: no-costing page hints at prices.ini", "prices.ini" in pn)
 
 
 def test_fleet_model(tmp):
@@ -365,6 +424,7 @@ def main():
         test_loading(os.path.join(tmp, "load"))
         test_identity_model()
         test_licensing_model()
+        test_licensing_costing_render()
         test_fleet_model(tmp)
         test_changes_model()
         test_render_empty_console()
