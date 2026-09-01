@@ -199,12 +199,17 @@ def load_fleet(path):
 
 
 LOADERS = {
-    "tenant":      ("Identity",    load_tenant),
-    "run_summary": ("Last run",    load_run_summary),
-    "security":    ("Security",    load_security),
-    "licensing":   ("Licensing",   load_licensing),
-    "history":     ("Change log",  load_history),
-    "fleet":       ("Print fleet", load_fleet),
+    "tenant":            ("Identity",         load_tenant),
+    "run_summary":       ("Last run",         load_run_summary),
+    "security":          ("Security",         load_security),
+    "licensing":         ("Licensing",        load_licensing),
+    "history":           ("Change log",       load_history),
+    "fleet":             ("Print fleet",      load_fleet),
+    # run-all archives the two JSON feeds above after each successful run;
+    # these folders of snapshots become the "over time" trend lines. Both
+    # files carry GeneratedUtc, so the tenant-docs history loader fits as-is.
+    "security_history":  ("Security trend",  load_history),
+    "licensing_history": ("Licensing trend", load_history),
 }
 
 

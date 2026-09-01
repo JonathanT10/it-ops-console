@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from .render import (bar_rows, badge, esc, freshness_chip, meter, money,
-                     muted_badge, shell, sparkline, status_badge)
+from .render import (bar_rows, badge, delta_badge, esc, fmt_metric, freshness_chip,
+                     meter, money, muted_badge, shell, sparkline, status_badge, trend_card)
 
 
 def _empty(msg, hint=""):
@@ -116,6 +116,37 @@ def _act(text):
     return ('<span class="act">%s</span>' % esc(text)) if text else ""
 
 
+def _trend_section(title, block, keys=None):
+    """Posture over time as small multiples. With fewer than two days of data
+    it says so calmly rather than drawing a one-point chart; with none at all
+    it renders nothing (the feed is simply not configured)."""
+    if not block:
+        return ""
+    if block["points"] < 2:
+        return ('<section><h2>%s</h2><p class="note">Trends appear after the second '
+                'refresh &mdash; one snapshot so far (%s). Each refresh adds a day.</p></section>'
+                % (esc(title), esc(block["last"] or "")))
+    metrics = block["metrics"]
+    if keys:
+        metrics = [m for m in metrics if m["key"] in keys]
+    metrics = [m for m in metrics if len(m["values"]) >= 1]
+    if not metrics:
+        return ""
+    note = ("%d days of snapshots, %s &rarr; %s. Each card is the value now and how it "
+            "moved since the previous day; green means moving the right way."
+            % (block["points"], esc(block["first"]), esc(block["last"])))
+    return ('<section><h2>%s</h2><p class="note">%s</p><div class="trend-grid">%s</div></section>'
+            % (esc(title), note, "".join(trend_card(m) for m in metrics)))
+
+
+def _tile_trend(metric):
+    """Sparkline + delta badge for an overview tile; empty without two points."""
+    if not metric or len(metric.get("values") or []) < 2:
+        return ""
+    return ('<div class="spark">%s%s</div>'
+            % (sparkline(metric["values"], width=160, height=26), delta_badge(metric)))
+
+
 # --------------------------------------------------------------------------- #
 # Overview
 # --------------------------------------------------------------------------- #
@@ -123,9 +154,10 @@ def _act(text):
 def build_overview(models, feeds, available, generated):
     tiles = []
 
-    def tile(key, title, headline, sub, feed, extra=""):
+    def tile(key, title, headline, sub, feed, extra="", trend=""):
         # `key` is the PAGE name; `feed` is the loaded feed that backs it -
         # they are deliberately different (identity <- tenant, changes <- history).
+        # `trend` is an optional sparkline+delta row: direction at a glance.
         f = feed
         if f is None or not f.ok:
             note = (f.status_note if f else "not configured")
@@ -134,10 +166,14 @@ def build_overview(models, feeds, available, generated):
                     '<div class="headline">%s</div>'
                     '<div class="sub">%s</div></div>' % (esc(title), esc(head), esc(note)))
         return ('<a class="tile" href="%s.html"><div class="top"><span class="title">%s</span>%s</div>'
-                '<div class="headline">%s</div><div class="sub">%s</div>'
+                '<div class="headline">%s</div><div class="sub">%s</div>%s'
                 '<div class="foot"><span class="dot %s"></span>%s</div></a>'
-                % (esc(key), esc(title), extra, esc(headline), esc(sub),
+                % (esc(key), esc(title), extra, esc(headline), esc(sub), trend,
                    esc(f.state), esc(f.age)))
+
+    trends = models.get("trends") or {}
+    sec_trend = trends.get("security") or {}
+    lic_trend = trends.get("licensing") or {}
 
     ident = models.get("identity")
     if ident:
@@ -159,10 +195,12 @@ def build_overview(models, feeds, available, generated):
         head = ("%s%%" % mfa["percent"]) if mfa and mfa.get("percent") is not None else "-"
         n = len(sec["admins_without_mfa"])
         extra = badge("critical", "warn", "%d admin%s" % (n, "" if n == 1 else "s")) if n else badge("good", "check", "admins ok")
+        # Direction at a glance: the MFA coverage trend under the headline.
         tiles.append(tile("security", "Security", head,
                           "MFA coverage - %d stale accounts, %d guests"
                           % (len(sec["stale_members"]), sec["guests_total"] or 0),
-                          feeds["security"], extra))
+                          feeds["security"], extra,
+                          _tile_trend((sec_trend.get("by_key") or {}).get("mfa_percent"))))
     else:
         tiles.append(tile("security", "Security", "", "", feeds.get("security")))
 
@@ -171,17 +209,19 @@ def build_overview(models, feeds, available, generated):
         n = len(lic["candidates"])
         extra = badge("warning", "warn", "%d to review" % n) if n else badge("good", "check", "clean")
         lcost = lic.get("costing") or {}
+        lkeys = lic_trend.get("by_key") or {}
         if lcost.get("HasPrices"):
             # Money leads when we have it: the annual unused figure, then the
-            # reclaimable figure as the subline.
+            # reclaimable figure as the subline - and the $/month trend beneath.
             headline = money(lcost.get("UnusedSeatsAnnual"), lcost.get("Currency") or "$")
             sub = ("unused seats / year - %s/yr reclaimable now"
                    % money(lcost.get("ReclaimableAnnual"), lcost.get("Currency") or "$"))
-            tiles.append(tile("licensing", "Licensing", headline, sub, feeds["licensing"], extra))
+            tiles.append(tile("licensing", "Licensing", headline, sub, feeds["licensing"], extra,
+                              _tile_trend(lkeys.get("unused_monthly") or lkeys.get("unassigned"))))
         else:
             tiles.append(tile("licensing", "Licensing", lic["unassigned_total"],
                               "unassigned seats - %d licensed users" % (lic["licensed_users"] or 0),
-                              feeds["licensing"], extra))
+                              feeds["licensing"], extra, _tile_trend(lkeys.get("unassigned"))))
     else:
         tiles.append(tile("licensing", "Licensing", "", "", feeds.get("licensing")))
 
@@ -395,7 +435,7 @@ def build_identity(m, feed, available, generated):
 # Security
 # --------------------------------------------------------------------------- #
 
-def build_security(m, feed, available, generated):
+def build_security(m, feed, available, generated, trend=None):
     if not m:
         return shell("Security", "security", available,
                      _feed_empty("Security", feed,
@@ -453,7 +493,10 @@ def build_security(m, feed, available, generated):
                      _table(["Name", "UPN", "Last sign-in"], stale_rows, "No stale accounts."),
                      more))
 
-    body = (freshness_chip(feed.state, feed.age, "Snapshot") + cards + admins_html +
+    # Posture over time sits right under the cards: the same numbers, as a story.
+    trend_html = _trend_section("Posture over time", trend)
+
+    body = (freshness_chip(feed.state, feed.age, "Snapshot") + cards + trend_html + admins_html +
             legacy_html + roles_html + stale_html)
     return shell("Security", "security", available, body, generated,
                  subtitle="Posture: who can act, who is exposed, what is still reachable the old way")
@@ -463,7 +506,7 @@ def build_security(m, feed, available, generated):
 # Licensing
 # --------------------------------------------------------------------------- #
 
-def build_licensing(m, feed, available, generated):
+def build_licensing(m, feed, available, generated, trend=None):
     if not m:
         return shell("Licensing", "licensing", available,
                      _feed_empty("Licensing", feed,
@@ -560,7 +603,12 @@ def build_licensing(m, feed, available, generated):
                  % (esc(next_step("disabled-licensed")),
                     _table(cand_cols, cand_rows, "Nothing to reclaim.")))
 
-    body = freshness_chip(feed.state, feed.age, "Report") + cards + sku_html + cons_html + cand_html
+    # Waste over time: the dollar lines lead when the SKUs are priced; the seat
+    # and headcount lines are always there. Metrics with no data simply skip.
+    trend_html = _trend_section("Waste over time", trend)
+
+    body = (freshness_chip(feed.state, feed.age, "Report") + cards + trend_html + sku_html +
+            cons_html + cand_html)
     return shell("Licensing", "licensing", available, body, generated,
                  subtitle="What you are paying for, and what nobody is using")
 

@@ -130,6 +130,16 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
 .tile.off { opacity: .72; }
 .tile.off .headline { color: var(--muted); font-size: 15px; font-weight: 600; }
+.tile .spark { margin-top: 8px; display: flex; align-items: center; gap: 10px; }
+.tile .spark > svg { flex: 1; height: 26px; }   /* the sparkline only - not the badge's icon */
+
+.trend-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.trend { background: var(--page); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.trend .k { font-size: 12px; color: var(--ink-2); }
+.trend .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums;
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.trend .v .badge { font-size: 11.5px; }
+.trend > svg { display: block; width: 100%; height: 34px; margin-top: 6px; }   /* sparkline only */
 
 .chg { display: flex; gap: 8px; padding: 5px 0; font-size: 13px; align-items: baseline;
   border-bottom: 1px solid var(--grid); }
@@ -269,6 +279,55 @@ def sparkline(values, width=210, height=34):
         '<circle cx="%s" cy="%s" r="2.5" fill="var(--accent)" stroke="var(--surface)" '
         'stroke-width="2"></circle></svg>' % (width, height, height, area, line, lx, ly)
     )
+
+
+def fmt_metric(value, unit):
+    """A metric value with its unit: '87%', '$1,240', '14'."""
+    if value is None:
+        return "&mdash;"
+    if unit == "%":
+        return esc("%g%%" % round(float(value), 1))
+    if unit and unit != "%":            # a currency prefix
+        return money(value, unit)
+    try:
+        return esc(format(int(round(float(value))), ","))
+    except (TypeError, ValueError):
+        return esc(value)
+
+
+def delta_badge(metric):
+    """How a metric moved since the previous point, read against which way is
+    good: improving -> good/check, worsening -> warning, flat or neutral ->
+    muted. Always a glyph plus words, never colour alone."""
+    d = metric.get("delta")
+    if d is None:
+        return muted_badge("first reading", "clock")
+    if abs(d) < 1e-9:
+        return muted_badge("no change")
+    sign = "+" if d > 0 else "−"
+    mag = abs(d)
+    unit = metric.get("unit") or ""
+    if unit == "%":
+        shown = "%g pts" % round(mag, 1)
+    elif unit:
+        shown = money(mag, unit)
+    else:
+        shown = format(int(round(mag)), ",")
+    label = "%s%s since last" % (sign, shown)
+    tone = metric.get("tone")
+    if tone == "good":
+        return badge("good", "check", label)
+    if tone == "warning":
+        return badge("warning", "warn", label)
+    return muted_badge(label)
+
+
+def trend_card(metric):
+    """One small-multiple: label, current value with its delta, sparkline."""
+    return ('<div class="trend"><div class="k">%s</div>'
+            '<div class="v">%s %s</div>%s</div>'
+            % (esc(metric["label"]), fmt_metric(metric["current"], metric["unit"]),
+               delta_badge(metric), sparkline(metric["values"], width=220, height=34)))
 
 
 def freshness_chip(state, age, prefix="Data"):

@@ -200,6 +200,147 @@ def fleet_model(feed):
 
 
 # --------------------------------------------------------------------------- #
+# Posture over time (archived security + licensing snapshots)
+#
+# run-all archives each collector's JSON after a successful run; those folders
+# plus the current snapshot become one point per calendar day (the latest run
+# that day wins, so five refreshes in an afternoon do not make a spiky chart).
+# Each metric knows which direction is GOOD, so a change can be read as
+# improving or worsening rather than just up or down.
+# --------------------------------------------------------------------------- #
+
+# (key, label, good direction, unit). "neutral" metrics report direction with
+# no judgement - more guests is not inherently better or worse.
+SECURITY_METRICS = [
+    ("mfa_percent",    "MFA coverage",         "up",      "%"),
+    ("admins_no_mfa",  "Admins without MFA",   "down",    ""),
+    ("stale",          "Stale accounts",       "down",    ""),
+    ("guests",         "Guests",               "neutral", ""),
+    ("legacy_signins", "Legacy-auth sign-ins", "down",    ""),
+]
+LICENSING_METRICS = [
+    ("unused_monthly",  "Unused seats / month",  "down",    "$"),
+    ("reclaim_monthly", "Reclaimable / month",   "down",    "$"),
+    ("unassigned",      "Unused seats",          "down",    ""),
+    ("reclaim",         "Reclaim candidates",    "down",    ""),
+    ("licensed_users",  "Licensed users",        "neutral", ""),
+]
+
+
+def _sec_point(d):
+    cov = d.get("MfaCoverage") or {}
+    legacy = d.get("LegacyAuth") or {}
+    legacy_total = None
+    if legacy.get("Available"):
+        legacy_total = sum(int(s.get("SignIns") or 0) for s in _list(legacy.get("Summary")))
+    return {
+        "mfa_percent":    cov.get("CoveragePercent"),
+        "admins_no_mfa":  len(_list(d.get("AdminsWithoutMfa"))),
+        "stale":          len(_list(d.get("StaleMembers"))),
+        "guests":         (d.get("Guests") or {}).get("Total"),
+        "legacy_signins": legacy_total,
+    }
+
+
+def _lic_point(d):
+    cost = d.get("Costing") or {}
+    priced = bool(cost.get("HasPrices"))
+    return {
+        "unassigned":      sum(int(s.get("Unassigned") or 0) for s in _list(d.get("SkuSummary"))),
+        "reclaim":         len(_list(d.get("ReclaimCandidates"))),
+        "licensed_users":  d.get("LicensedUsers"),
+        "unused_monthly":  cost.get("UnusedSeatsMonthly") if priced else None,
+        "reclaim_monthly": cost.get("ReclaimableMonthly") if priced else None,
+        "currency":        cost.get("Currency") if priced else None,
+    }
+
+
+def _daily_points(hist_feed, current_feed, point_fn):
+    """Archived snapshots + the current one -> one point per day, oldest first."""
+    snaps = []
+    if hist_feed is not None and hist_feed.ok:
+        snaps.extend(hist_feed.data)
+    if current_feed is not None and current_feed.ok:
+        snaps.append(current_feed.data)
+    by_day = {}
+    for s in snaps:
+        if not isinstance(s, dict):
+            continue
+        ts = parse_ts(s.get("GeneratedUtc"))
+        if ts is None:
+            continue
+        day = ts.strftime("%Y-%m-%d")
+        held = by_day.get(day)
+        if held is None or ts > held[0]:
+            by_day[day] = (ts, s)
+    points = []
+    for day in sorted(by_day):
+        ts, s = by_day[day]
+        p = point_fn(s)
+        p["ts"], p["day"] = ts, day
+        points.append(p)
+    return points
+
+
+def _metric(points, key, label, good, unit):
+    """The trailing run of days this metric has a value for, its current value,
+    and how it moved since the previous point - read against `good`."""
+    vals = [p.get(key) for p in points]
+    start = len(vals)
+    for i in range(len(vals) - 1, -1, -1):
+        if vals[i] is None:
+            break
+        start = i
+    vals = vals[start:]
+    if not vals:
+        return None
+    current = vals[-1]
+    delta = (current - vals[-2]) if len(vals) >= 2 else None
+    if delta is None or good == "neutral" or abs(delta) < 1e-9:
+        tone = "muted"
+    elif (delta > 0) == (good == "up"):
+        tone = "good"
+    else:
+        tone = "warning"
+    return {"key": key, "label": label, "unit": unit, "good": good,
+            "values": vals, "current": current, "delta": delta, "tone": tone}
+
+
+def _trend_block(points, spec, currency=None):
+    metrics = []
+    for key, label, good, unit in spec:
+        m = _metric(points, key, label, good, unit)
+        if m is None:
+            continue
+        if unit == "$":
+            m["unit"] = currency or "$"
+        metrics.append(m)
+    return {
+        "points": len(points),
+        "first": points[0]["day"] if points else None,
+        "last": points[-1]["day"] if points else None,
+        "metrics": metrics,
+        "by_key": {m["key"]: m for m in metrics},
+    }
+
+
+def trends_model(security_hist, security, licensing_hist, licensing):
+    """Series for the Security and Licensing pages and the overview tiles.
+    Each half is None when there is nothing at all to plot; a half with a
+    single point still comes back so the page can say 'trends appear after
+    the second refresh' instead of nothing."""
+    out = {"security": None, "licensing": None}
+    sp = _daily_points(security_hist, security, _sec_point)
+    if sp:
+        out["security"] = _trend_block(sp, SECURITY_METRICS)
+    lp = _daily_points(licensing_hist, licensing, _lic_point)
+    if lp:
+        cur = next((p.get("currency") for p in reversed(lp) if p.get("currency")), None)
+        out["licensing"] = _trend_block(lp, LICENSING_METRICS, currency=cur)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Change log (entra-tenant-docs history)
 # --------------------------------------------------------------------------- #
 
