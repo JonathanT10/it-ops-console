@@ -193,6 +193,23 @@ Intune, or a printer. The scopes are whatever the underlying tools need:
 `AuditLog.Read.All`, and the three `DeviceManagement*.Read.All` scopes for the
 Intune sections. Skip a tool and you can skip its scopes.
 
+## Who can read what it collects
+
+The collected data — admin names, stale-account lists, the app inventory — lands
+under the install folder (`C:\IT-Ops` by default). A folder under `C:\` is
+readable by every local user out of the box, and that read access is the real
+exposure, so **setup locks the install folder to the person who installed it,
+`Administrators`, and `SYSTEM`; every other local user is shut out.** No secret
+is stored either way — collection is read-only and reads credential *names* and
+expiry dates, never a secret value — so this is about who can read findings, not
+credential theft. `check-setup.ps1` flags it if that lock is ever missing.
+
+Two things this ACL implies. If a **scheduled refresh runs as a service
+account** rather than you, grant that account access to the folder (it inherits
+nothing automatically beyond `SYSTEM`). And if you deliberately **serve
+`console-site` off this box** — a file share or a web root — you loosen the lock
+on that subfolder yourself; the default assumes the console stays local.
+
 ## Design notes
 
 **The console is a renderer, nothing more.** It has no credentials, no network

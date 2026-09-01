@@ -68,6 +68,10 @@ puts two shortcuts on your desktop, and offers to run the first collection:
   IT Ops Console        opens the result in your browser
 
 Everything against your tenant is read-only. Nothing stores a password.
+Setup locks the C:\IT-Ops folder to you and Administrators, so the data it
+collects (admin names, stale accounts, the app inventory) is not readable by
+other people who use this computer. If a scheduled refresh runs as a service
+account, grant that account access to the folder.
 Printers are optional: put their IPs in
 C:\IT-Ops\tools\print-fleet-dashboard\config.ini and the next Refresh
 picks them up automatically.

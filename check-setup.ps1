@@ -42,6 +42,28 @@ foreach ($r in 'entra-tenant-docs','entra-security-snapshot','m365-license-waste
 if (Test-Path (Join-Path (Join-Path $tools 'it-ops-console') 'sources.ini')) { Say 'sources.ini (the wiring file)' }
 else { Gap 'sources.ini is missing - re-run setup to rewrite it' }
 
+# ---- can other local users read your collected data? ---- #
+# The collected data (admin names, stale accounts, app inventory) lives under
+# the install folder. Setup locks it to you + Administrators; flag it here if
+# that lock is missing so a re-run (or a manual fix) can restore it.
+if (Test-Path $output) {
+    try {
+        $acl = Get-Acl $output
+        $usersOpen = @($acl.Access | Where-Object {
+            $_.AccessControlType -eq 'Allow' -and
+            $_.IdentityReference.Value -in @('BUILTIN\Users', 'NT AUTHORITY\Authenticated Users', 'Everyone') -and
+            ($_.FileSystemRights.ToString() -match 'Read|FullControl|Modify')
+        })
+        if ($usersOpen.Count) {
+            Gap ("collected data in $output is readable by other local users ({0}) - re-run setup to lock it down" -f (($usersOpen.IdentityReference.Value | Sort-Object -Unique) -join ', '))
+        } else {
+            Say 'collected data is restricted to you + Administrators'
+        }
+    } catch {
+        Note "could not read the permissions on $output ($($_.Exception.Message))"
+    }
+}
+
 # ---- has anything been collected / built? ---- #
 Write-Host ''
 $idx = Join-Path $site 'index.html'

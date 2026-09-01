@@ -95,6 +95,36 @@ $output = Join-Path $Root 'output'
 $site = Join-Path $Root 'console-site'
 foreach ($d in @($Root, $tools, $output, $site)) { $null = New-Item -ItemType Directory -Path $d -Force }
 
+# --- Lock the install folder to you + admins ------------------------------- #
+# Everything the tools collect lands under here - admin UPNs, stale-account
+# lists, the app inventory. A folder under C:\ is readable by every local user
+# by default; that read access is the whole exposure. Restrict it to the
+# installing user, Administrators and SYSTEM, and let children inherit. Done
+# before the tools are written, so everything created afterward inherits it.
+# Best effort: a machine where this can't be set still installs, with a warning.
+if ($onWindows) {
+    try {
+        $acl = New-Object System.Security.AccessControl.DirectorySecurity
+        $acl.SetAccessRuleProtection($true, $false)     # drop inherited ACEs
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $full = [System.Security.AccessControl.FileSystemRights]::FullControl
+        $inh  = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+        $none = [System.Security.AccessControl.PropagationFlags]::None
+        $allow = [System.Security.AccessControl.AccessControlType]::Allow
+        # SIDs, not "BUILTIN\Administrators" strings - language-independent.
+        foreach ($id in @($me,
+            (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'),  # Administrators
+            (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'))) {   # SYSTEM
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $id, $full, $inh, $none, $allow)))
+        }
+        Set-Acl -Path $Root -AclObject $acl
+        Write-Host "  locked $Root to you + Administrators - other local users can't read collected data"
+    } catch {
+        Write-Warning "  could not lock $Root down ($($_.Exception.Message)) - it may be readable by other local users; see the README to set this by hand."
+    }
+}
+
 # --------------------------------------------------------------------------- #
 Write-Host ''
 # A release bundle ships the tools right next to this script; installing from
