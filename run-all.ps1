@@ -242,6 +242,28 @@ Invoke-Native -Name 'console build' -Exe $Python -WorkDir $PSScriptRoot `
 # Summary
 # --------------------------------------------------------------------------- #
 
+function Get-PlainWords {
+    # Turn the most common failure texts into a sentence a non-technical
+    # person can act on. The raw detail stays in the table above - this is a
+    # translation, not a replacement.
+    param([string]$Step, [string]$Detail)
+    if ($Step -eq 'console build') {
+        return 'The console pages could not be rebuilt, so the site still shows the previous data. If this keeps happening, check that Python 3 is installed.'
+    }
+    switch -Wildcard ($Detail) {
+        '*AADSTS*'                       { return 'The sign-in did not complete. Run this again and finish the sign-in window.' }
+        '*Authentication needed*'        { return 'You were not signed in. Run this again and finish the sign-in window.' }
+        '*InteractiveBrowserCredential*' { return 'The sign-in window was closed before finishing. Run this again.' }
+        '*User canceled*'                { return 'The sign-in was cancelled. Run this again when ready.' }
+        '*Insufficient privileges*'      { return 'Your account was not allowed to read this data. An administrator needs to approve the read-only permissions once.' }
+        '*Authorization_RequestDenied*'  { return 'Your account was not allowed to read this data. An administrator needs to approve the read-only permissions once.' }
+        '*not found: *'                  { return 'A tool folder is missing. Re-run setup and it will download it again.' }
+        '*TooManyRequests*'              { return 'Microsoft asked us to slow down. Wait a few minutes and run this again.' }
+        '*429*'                          { return 'Microsoft asked us to slow down. Wait a few minutes and run this again.' }
+    }
+    return $null
+}
+
 # Laid out by hand rather than with Format-Table: a non-interactive host (a
 # scheduled task, a CI runner) reports no console width and Format-Table then
 # silently prints nothing at all.
@@ -258,6 +280,17 @@ Write-Host ''
 $failed  = @($results.ToArray() | Where-Object { $_.Status -eq 'FAILED' })
 $missing = @($results.ToArray() | Where-Object { $_.Status -eq 'missing' })
 $consoleFailed = @($failed | Where-Object { $_.Step -eq 'console build' }).Count -gt 0
+
+$plain = @()
+foreach ($r in $failed + $missing) {
+    $words = Get-PlainWords $r.Step $r.Detail
+    if ($words) { $plain += "  $($r.Step): $words" }
+}
+if ($plain.Count) {
+    Write-Host 'In plain words:'
+    foreach ($line in $plain) { Write-Host $line }
+    Write-Host ''
+}
 
 if ($failed.Count -or $missing.Count) {
     if ($consoleFailed) {

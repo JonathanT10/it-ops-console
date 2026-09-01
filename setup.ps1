@@ -231,9 +231,10 @@ if (-not $Unattended -and (Ask-YesNo 'Last question - run the first collection n
     if ($python) { $runAllArgs['Python'] = $python }
     & (Join-Path $consoleDir 'run-all.ps1') @runAllArgs
 }
-if (-not $Unattended) {
+if (-not $Unattended -and -not $env:ITOPS_CMD) {
     Write-Host ''
     # "Run with PowerShell" closes the window the instant the script ends -
     # without this, a successful setup looks like a window that just vanished.
+    # (Skipped when the .cmd launcher started us - it holds the window itself.)
     $null = Read-Host 'All done - press Enter to close this window'
 }

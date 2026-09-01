@@ -71,11 +71,16 @@ The builder also prints a feed table and a warning when anything has gone stale,
 so a scheduled build tells you in its own log that a collector has stopped
 running.
 
-## The easy way — one script, no git, no editing configs
+## The easy way — download one file, double-click it
 
-For the admin who wants the console without assembling it: download
-[`setup.ps1`](setup.ps1), then right-click it → **Run with PowerShell** (or run
-`powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1`). It creates
+Download [`Setup-IT-Ops-Console.cmd`](Setup-IT-Ops-Console.cmd) and
+double-click it. That is the whole instruction: it fetches `setup.ps1` next to
+itself and runs it with the right settings — no PowerShell knowledge, no
+right-click menus, no execution policy. (Windows may show "Windows protected
+your PC" for a downloaded file — click **More info → Run anyway**.)
+
+Prefer to see what you are running first? Download [`setup.ps1`](setup.ps1)
+itself and right-click → **Run with PowerShell**. Same result. It creates
 `C:\IT-Ops`, downloads all five tools, installs the Graph modules, checks for
 Python and offers to install it, writes a `sources.ini` where everything
 already points at everything else, and puts two shortcuts on your desktop:
@@ -89,6 +94,13 @@ interactively each refresh. Works in Windows PowerShell 5.1 — the one
 "right-click → Run with PowerShell" actually launches — as well as
 PowerShell 7. Printers are optional; add their IPs to
 `tools\print-fleet-dashboard\config.ini` whenever you get to it.
+
+**If something goes wrong:** run [`check-setup.ps1`](check-setup.ps1)
+(right-click → Run with PowerShell). It is read-only, says in plain words what
+is missing and what to do about each thing, and writes `check-setup.log` for
+whoever is helping you. Setup keeps its own `setup.log` the same way, and a
+failed refresh ends with an "In plain words" section that translates the error
+into an action.
 
 ## Setup by hand
 
