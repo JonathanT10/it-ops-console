@@ -33,7 +33,11 @@ zeroes that look like real numbers.
 
 **Overview** — one tile per domain with its headline number, a "needs a human"
 panel that pulls the genuinely actionable items out of all four feeds into one
-list, and a freshness dot per feed.
+list, and a freshness dot per feed. Every finding there — and wherever it
+reappears on its own page — carries a one-line plain-English next step: not
+just *what's wrong* but *what you do about it* ("exclude your break-glass
+accounts from every all-users MFA policy", "have them register at
+aka.ms/mfasetup"), so a reader can act without already knowing the answer.
 
 **Identity** — tenant and user counts, Conditional Access policies by state, the
 CA gap analysis, directory roles by membership size, groups, authentication
