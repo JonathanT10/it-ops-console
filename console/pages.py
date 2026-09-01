@@ -48,6 +48,75 @@ def _table(headers, rows, empty="Nothing to show."):
 
 
 # --------------------------------------------------------------------------- #
+# Plain-English next steps. A finding is only useful if the reader knows what
+# to DO about it, so every finding carries one line saying exactly that -
+# wherever it appears. Conditional Access gaps are keyed by the gap analysis's
+# own check ids (entra-tenant-docs, Get-CaGapAnalysis).
+# --------------------------------------------------------------------------- #
+
+CA_GAP_ACTION = {
+    "mfa-all-users":
+        "Create a Conditional Access policy that requires MFA for all users on all cloud apps.",
+    "block-legacy-auth":
+        "Add a Conditional Access policy that blocks legacy clients "
+        "(Exchange ActiveSync and 'Other clients').",
+    "admin-mfa":
+        "Require MFA for admin roles - a Conditional Access policy targeting directory roles, "
+        "or confirm the all-users MFA policy covers them.",
+    "baseline-exists":
+        "Turn on at least one enforced Conditional Access policy, or enable Security Defaults.",
+    "breakglass-exclusion":
+        "Exclude your break-glass (emergency) accounts from every all-users block or MFA policy "
+        "so you cannot lock yourself out.",
+    "guest-protection":
+        "Cover guests with MFA or a block: a Conditional Access policy targeting "
+        "'Guests or external users'.",
+    "risk-policies":
+        "Optional, needs Entra ID P2: add sign-in-risk and user-risk Conditional Access policies.",
+    "device-grants":
+        "Optional: require a compliant or hybrid-joined device in a Conditional Access grant.",
+    "report-only-lingering":
+        "Decide on each report-only policy: switch it to On, or delete it.",
+    "unused-locations":
+        "Delete named locations no policy uses, or reference them in a policy.",
+}
+
+
+def next_step(kind, key=None):
+    """One line: what a person does next about this kind of finding."""
+    if kind == "ca-gap":
+        return CA_GAP_ACTION.get(str(key or ""),
+                                 "Review this Conditional Access gap in the Entra admin center.")
+    if kind == "admin-no-mfa":
+        return ("Have them register MFA (aka.ms/mfasetup) today, and enforce it for admin roles "
+                "with Conditional Access so it cannot lapse.")
+    if kind == "disabled-licensed":
+        return ("Remove the license from the disabled account (M365 admin center > Users > "
+                "Active users) so the seat can be reclaimed.")
+    if kind == "stale-account":
+        return ("Check with the person's manager; if they have left, disable the account and "
+                "reclaim its licenses.")
+    if kind == "legacy-auth":
+        return ("Block it: a Conditional Access policy targeting legacy clients "
+                "(Exchange ActiveSync and 'Other clients') closes this path.")
+    if kind == "fleet":
+        st = str(key or "")
+        if st == "offline":
+            return ("Check the printer is powered on and on the network; it is marked offline "
+                    "when it stops answering SNMP.")
+        if st == "warning":
+            return "Restock what the detail names (toner or paper) before it runs out."
+        return ("Walk to the printer - its panel will show what the detail here describes "
+                "(jam, door open, out of toner).")
+    return ""
+
+
+def _act(text):
+    """The arrow line under a finding. Empty when there is nothing to say."""
+    return ('<span class="act">%s</span>' % esc(text)) if text else ""
+
+
+# --------------------------------------------------------------------------- #
 # Overview
 # --------------------------------------------------------------------------- #
 
@@ -141,38 +210,44 @@ def build_overview(models, feeds, available, generated):
     # every page flags. Informational findings stay on their own page.
     urgent = []
 
-    def urge(rank, domain, what, detail):
-        urgent.append((rank, domain, what, detail or ""))
+    def urge(rank, domain, what, detail, action):
+        urgent.append((rank, domain, what, detail or "", action or ""))
 
     if ident:
         for g in ident["gaps_failing"]:
             sev = g.get("Severity")
             if sev in ("critical", "warning"):
                 urge(0 if sev == "critical" else 2, "Identity",
-                     "CA gap: %s" % g.get("Title"), g.get("Detail"))
+                     "CA gap: %s" % g.get("Title"), g.get("Detail"),
+                     next_step("ca-gap", g.get("Id")))
     if sec:
         for a in sec["admins_without_mfa"][:5]:
-            urge(0, "Security", "Admin without MFA: %s" % a.get("DisplayName"), a.get("Roles"))
+            urge(0, "Security", "Admin without MFA: %s" % a.get("DisplayName"), a.get("Roles"),
+                 next_step("admin-no-mfa"))
     if fl:
         for d in fl["attention"]:
             if d["status"] in ("error", "offline"):
-                urge(1, "Print fleet", "%s: %s" % (d["name"], d["status"]), d["detail"])
+                urge(1, "Print fleet", "%s: %s" % (d["name"], d["status"]), d["detail"],
+                     next_step("fleet", d["status"]))
     if lic:
         # A disabled account still holding a paid seat is money leaking, and it
         # is the one licensing finding that needs no conversation first.
         for c in lic["disabled_holders"][:5]:
             urge(2, "Licensing",
                  "Disabled account still licensed: %s" % (c.get("DisplayName") or c.get("UserPrincipalName")),
-                 c.get("Licenses") or c.get("Reason"))
+                 c.get("Licenses") or c.get("Reason"),
+                 next_step("disabled-licensed"))
 
     urgent.sort(key=lambda u: u[0])
     urgent_html = ""
     if urgent:
         shown = urgent[:12]
         rows = "".join(
-            '<div class="chg"><span class="kind">%s</span><span>%s%s</span></div>'
-            % (esc(dom), esc(what), (' <span class="cat">&mdash; %s</span>' % esc(detail)) if detail else "")
-            for _rank, dom, what, detail in shown)
+            '<div class="chg"><span class="kind">%s</span><span>%s%s%s</span></div>'
+            % (esc(dom), esc(what),
+               (' <span class="cat">&mdash; %s</span>' % esc(detail)) if detail else "",
+               _act(action))
+            for _rank, dom, what, detail, action in shown)
         note = ("Pulled from every domain below. %d item%s."
                 % (len(urgent), "" if len(urgent) == 1 else "s"))
         if len(shown) < len(urgent):
@@ -228,11 +303,13 @@ def build_identity(m, feed, available, generated):
             else:
                 b = badge("critical" if g.get("Severity") == "critical" else "warning",
                           "warn", "Gap - %s" % g.get("Severity"))
+            # Only a FAILING gap gets a next step - a passing check has nothing to do.
+            act = _act(next_step("ca-gap", g.get("Id"))) if g.get("Result") == "fail" else ""
             rows.append('<div class="chg"><span style="flex:none;width:132px">%s</span>'
-                        '<span>%s%s</span></div>'
+                        '<span>%s%s%s</span></div>'
                         % (b, esc(g.get("Title")),
                            (' <span class="cat">&mdash; %s</span>' % esc(g.get("Detail")))
-                           if g.get("Detail") else ""))
+                           if g.get("Detail") else "", act))
         gaps_html = ('<section><h2>Conditional Access gaps</h2>'
                      '<p class="note">Baseline hygiene checks, not a compliance audit.</p>%s</section>'
                      % "".join(rows))
@@ -340,9 +417,10 @@ def build_security(m, feed, available, generated):
                   for a in m["admins_without_mfa"]]
     admins_html = ('<section><h2>Admins without MFA registered</h2>'
                    '<p class="note">The list to work through first. Service accounts still count '
-                   '&mdash; they just need a different fix.</p>%s</section>'
-                   % _table(["Name", "UPN", "Roles"], admin_rows,
-                            "Every role holder has MFA registered."))
+                   '&mdash; they just need a different fix. %s</p>%s</section>'
+                   % (esc(next_step("admin-no-mfa")),
+                      _table(["Name", "UPN", "Roles"], admin_rows,
+                             "Every role holder has MFA registered.")))
 
     roles_html = ('<section><h2>Role assignments</h2>%s</section>'
                   % bar_rows([{"label": r.get("Role"), "count": r.get("Assignments")}
@@ -354,9 +432,10 @@ def build_security(m, feed, available, generated):
                 for s in m["legacy_summary"]]
         legacy_html = ('<section><h2>Legacy authentication</h2>'
                        '<p class="note">Sign-ins over protocols that cannot do modern auth. '
-                       'Anything here is a path around your CA policies.</p>%s</section>'
-                       % _table(["Client app", "#Sign-ins", "#Users"], rows,
-                                "No legacy-auth sign-ins in the window."))
+                       'Anything here is a path around your CA policies. %s</p>%s</section>'
+                       % (esc(next_step("legacy-auth")),
+                          _table(["Client app", "#Sign-ins", "#Users"], rows,
+                                 "No legacy-auth sign-ins in the window.")))
     else:
         legacy_html = ('<section><h2>Legacy authentication</h2>'
                        '<p class="note">Not available in this snapshot (needs Entra ID P1/P2 '
@@ -369,9 +448,10 @@ def build_security(m, feed, available, generated):
             'the snapshot CSV.</p>' % len(m["stale_members"])) if len(m["stale_members"]) > 40 else ""
     stale_html = ('<section><h2>Stale accounts</h2><p class="note">Enabled members with no sign-in '
                   'for over %s days. A quiet account is sometimes a service account doing its '
-                  'job &mdash; check before disabling.</p>%s%s</section>'
-                  % (m["stale_days"], _table(["Name", "UPN", "Last sign-in"], stale_rows,
-                                             "No stale accounts."), more))
+                  'job &mdash; check before disabling. %s</p>%s%s</section>'
+                  % (m["stale_days"], esc(next_step("stale-account")),
+                     _table(["Name", "UPN", "Last sign-in"], stale_rows, "No stale accounts."),
+                     more))
 
     body = (freshness_chip(feed.state, feed.age, "Snapshot") + cards + admins_html +
             legacy_html + roles_html + stale_html)
@@ -475,8 +555,10 @@ def build_licensing(m, feed, available, generated):
         cand_rows.append(row)
     cand_html = ('<section><h2>Reclaim candidates</h2>'
                  '<p class="note">Conversation starters, not verdicts &mdash; confirm with the '
-                 'user\'s manager before reclaiming anything.</p>%s</section>'
-                 % _table(cand_cols, cand_rows, "Nothing to reclaim."))
+                 'user\'s manager before reclaiming anything. Disabled accounts are the '
+                 'exception: %s</p>%s</section>'
+                 % (esc(next_step("disabled-licensed")),
+                    _table(cand_cols, cand_rows, "Nothing to reclaim.")))
 
     body = freshness_chip(feed.state, feed.age, "Report") + cards + sku_html + cons_html + cand_html
     return shell("Licensing", "licensing", available, body, generated,
@@ -504,9 +586,10 @@ def build_fleet(m, feed, available, generated):
     att_rows = []
     for d in m["attention"]:
         att_rows.append([status_badge(d["status"]), esc(d["name"]),
-                         esc(d["detail"] or ""), esc(d["model"] or "")])
+                         esc(d["detail"] or ""), esc(d["model"] or ""),
+                         esc(next_step("fleet", d["status"]))])
     att_html = ('<section><h2>Needs attention</h2>%s</section>'
-                % _table(["Status", "Device", "Detail", "Model"], att_rows,
+                % _table(["Status", "Device", "Detail", "Model", "What to do"], att_rows,
                          "Every device is reporting OK."))
 
     dev_rows = []

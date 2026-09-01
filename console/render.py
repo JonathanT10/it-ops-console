@@ -137,6 +137,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .chg .kind { flex: none; width: 74px; font-size: 11.5px; font-weight: 600;
   color: var(--ink-2); text-transform: uppercase; letter-spacing: .3px; }
 .chg .cat { color: var(--muted); }
+.chg .act { display: block; font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+.chg .act::before { content: "\\2192\\00a0"; color: var(--accent-deep); }
 .chg-ts { margin: 13px 0 2px; font-size: 12px; color: var(--muted);
   font-variant-numeric: tabular-nums; }
 
