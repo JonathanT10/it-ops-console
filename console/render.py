@@ -176,6 +176,17 @@ def esc(v):
     return html.escape("" if v is None else str(v))
 
 
+def money(amount, currency="$"):
+    """Whole-dollar money with thousands separators, e.g. '$4,752'. Amounts are
+    monthly/annual sums where cents are noise; None renders as an em dash."""
+    if amount is None:
+        return "&mdash;"
+    try:
+        return "%s%s" % (esc(currency), format(int(round(float(amount))), ","))
+    except (TypeError, ValueError):
+        return esc(amount)
+
+
 def badge(color, icon, label):
     return ('<span class="badge" style="color:var(--%s)">%s%s</span>'
             % (color, ICONS.get(icon, ""), esc(label)))

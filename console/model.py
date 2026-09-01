@@ -129,6 +129,10 @@ def licensing_model(feed):
         "disabled_holders": disabled,
         "stale_holders": stale,
         "candidates": cands,
+        # Costing rides in from the license tool when a price list was used.
+        # Present only when -PriceList was passed; HasPrices distinguishes
+        # "priced" from "price file exists but is still blank".
+        "costing": d.get("Costing"),
     }
 
 

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from .render import (bar_rows, badge, esc, freshness_chip, meter, muted_badge,
-                     shell, sparkline, status_badge)
+from .render import (bar_rows, badge, esc, freshness_chip, meter, money,
+                     muted_badge, shell, sparkline, status_badge)
 
 
 def _empty(msg, hint=""):
@@ -101,9 +101,18 @@ def build_overview(models, feeds, available, generated):
     if lic:
         n = len(lic["candidates"])
         extra = badge("warning", "warn", "%d to review" % n) if n else badge("good", "check", "clean")
-        tiles.append(tile("licensing", "Licensing", lic["unassigned_total"],
-                          "unassigned seats - %d licensed users" % (lic["licensed_users"] or 0),
-                          feeds["licensing"], extra))
+        lcost = lic.get("costing") or {}
+        if lcost.get("HasPrices"):
+            # Money leads when we have it: the annual unused figure, then the
+            # reclaimable figure as the subline.
+            headline = money(lcost.get("UnusedSeatsAnnual"), lcost.get("Currency") or "$")
+            sub = ("unused seats / year - %s/yr reclaimable now"
+                   % money(lcost.get("ReclaimableAnnual"), lcost.get("Currency") or "$"))
+            tiles.append(tile("licensing", "Licensing", headline, sub, feeds["licensing"], extra))
+        else:
+            tiles.append(tile("licensing", "Licensing", lic["unassigned_total"],
+                              "unassigned seats - %d licensed users" % (lic["licensed_users"] or 0),
+                              feeds["licensing"], extra))
     else:
         tiles.append(tile("licensing", "Licensing", "", "", feeds.get("licensing")))
 
@@ -381,28 +390,68 @@ def build_licensing(m, feed, available, generated):
                                  "Run Get-LicenseWasteReport.ps1 with -JsonPath "
                                  "(the Refresh shortcut does this for you)."),
                      generated)
-    cards = _cards([
+    # Costing rides in only when a price list was used. `priced` means at least
+    # one SKU actually has a number; a price file that exists but is still blank
+    # gets a gentle nudge instead of a dollar figure.
+    cost = m.get("costing") or {}
+    cur = cost.get("Currency") or "$"
+    priced = bool(cost.get("HasPrices"))
+
+    card_items = [
         {"k": "Unassigned seats", "v": m["unassigned_total"], "d": "across real SKUs"},
         {"k": "Licensed users", "v": m["licensed_users"] or "-"},
         {"k": "Disabled but licensed", "v": len(m["disabled_holders"])},
         {"k": "Stale but licensed", "v": len(m["stale_holders"]),
          "d": "over %s days" % m["stale_days"]},
         {"k": "SKUs tracked", "v": len(m["skus"])},
-    ])
+    ]
+    if priced:
+        # Lead with the money - it is the number a budget owner reads first.
+        card_items[:0] = [
+            {"k": "Unused seats / year", "v": money(cost.get("UnusedSeatsAnnual"), cur),
+             "d": "%s / month" % money(cost.get("UnusedSeatsMonthly"), cur)},
+            {"k": "Reclaimable now / year", "v": money(cost.get("ReclaimableAnnual"), cur),
+             "d": "disabled & stale accounts"},
+        ]
+    cards = _cards(card_items)
+
+    money_note = ""
+    if priced and cost.get("UnpricedSkuCount"):
+        money_note = ('<p class="note">%d SKU(s) have no price yet, so they show seats only. '
+                      'Add them to prices.ini to cost them: %s</p>'
+                      % (cost.get("UnpricedSkuCount"),
+                         esc(", ".join(cost.get("UnpricedSkus") or []))))
+    elif (m.get("costing") is not None) and not priced:
+        money_note = ('<p class="note">Your SKUs are listed in the license tool\'s '
+                      '<code>prices.ini</code> &mdash; type a per-seat price next to each and '
+                      'run Refresh again to see the dollar waste here.</p>')
+    else:
+        # First run: no price list was used yet. Refresh has just written a
+        # starter prices.ini with these SKUs, so point the user at it.
+        money_note = ('<p class="note">Want these seats in dollars? Add per-seat prices to the '
+                      'license tool\'s <code>prices.ini</code> (Refresh has listed your SKUs '
+                      'there for you) and run Refresh again.</p>')
 
     sku_rows = []
     for s in m["skus"]:
         purchased = int(s.get("Purchased") or 0)
         assigned = int(s.get("Assigned") or 0)
         pct = round(100.0 * assigned / purchased) if purchased else None
-        sku_rows.append([
+        row = [
             esc(s.get("Sku")), meter(pct),
             "%s / %s" % (esc(assigned), esc(purchased)),
             esc(s.get("Unassigned")),
-        ])
+        ]
+        if priced:
+            uc = s.get("UnusedMonthlyCost")
+            row.append(money(uc, cur) if uc is not None else '<span class="muted">&mdash;</span>')
+        sku_rows.append(row)
+    sku_cols = ["SKU", "Utilisation", "Assigned", "#Unassigned"]
+    if priced:
+        sku_cols.append("#$/mo unused")
     sku_html = ('<section><h2>Seats purchased vs assigned</h2>'
-                '<p class="note">Sorted by how many seats are sitting unused.</p>%s</section>'
-                % _table(["SKU", "Utilisation", "Assigned", "#Unassigned"], sku_rows))
+                '<p class="note">Sorted by how many seats are sitting unused.</p>%s%s</section>'
+                % (_table(sku_cols, sku_rows), money_note))
 
     cons_html = ""
     if m["consumption_skus"]:
@@ -413,14 +462,21 @@ def build_licensing(m, feed, available, generated):
                      'completeness &mdash; what matters is how many are in use.</p>%s</section>'
                      % _table(["SKU", "#In use"], rows))
 
-    cand_rows = [[esc(c.get("Reason")), esc(c.get("DisplayName")),
-                  esc(c.get("UserPrincipalName")), esc(c.get("Licenses"))]
-                 for c in m["candidates"][:50]]
+    cand_cols = ["Reason", "Name", "UPN", "Licenses"]
+    if priced:
+        cand_cols.append("#$/mo")
+    cand_rows = []
+    for c in m["candidates"][:50]:
+        row = [esc(c.get("Reason")), esc(c.get("DisplayName")),
+               esc(c.get("UserPrincipalName")), esc(c.get("Licenses"))]
+        if priced:
+            mc = c.get("MonthlyCost")
+            row.append(money(mc, cur) if mc is not None else '<span class="muted">&mdash;</span>')
+        cand_rows.append(row)
     cand_html = ('<section><h2>Reclaim candidates</h2>'
                  '<p class="note">Conversation starters, not verdicts &mdash; confirm with the '
                  'user\'s manager before reclaiming anything.</p>%s</section>'
-                 % _table(["Reason", "Name", "UPN", "Licenses"], cand_rows,
-                          "Nothing to reclaim."))
+                 % _table(cand_cols, cand_rows, "Nothing to reclaim."))
 
     body = freshness_chip(feed.state, feed.age, "Report") + cards + sku_html + cons_html + cand_html
     return shell("Licensing", "licensing", available, body, generated,
