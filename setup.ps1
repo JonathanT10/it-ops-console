@@ -17,6 +17,8 @@
            "IT Ops Console"       opens the console in your browser
            "Refresh IT Ops Data"  runs every collector (you sign in), then
                                   rebuilds the console
+      7. Offer to run that first collection right away - press Enter and
+         you go from "installed" to looking at your own data in one motion
 
     Everything the collectors do against your tenant is READ-ONLY. Nothing
     here stores a password - you sign in interactively when data is collected.
@@ -261,16 +263,40 @@ Write-Host "  Tools:    $tools"
 Write-Host "  Data:     $output"
 Write-Host "  Console:  $(Join-Path $site 'index.html')"
 Write-Host ''
-Write-Host 'Next: double-click "Refresh IT Ops Data" on your desktop, sign in when'
-Write-Host 'asked, and when it finishes open "IT Ops Console". Do that on whatever'
-Write-Host 'rhythm suits you - the console shows how old every number is, and says'
-Write-Host 'so loudly when data has gone stale.'
-Write-Host ''
 try { Stop-Transcript | Out-Null } catch { }
-if (-not $Unattended -and (Ask-YesNo 'Last question - run the first collection now? (you will sign in)' $false)) {
-    $runAllArgs = @{ ToolRoot = $tools; OutputRoot = $output; SitePath = $site }
-    if ($python) { $runAllArgs['Python'] = $python }
-    & (Join-Path $consoleDir 'run-all.ps1') @runAllArgs
+
+# One motion from "installed" to "looking at your own data": collecting now is
+# the default - Enter starts it, a plain N leaves the desktop icons for later.
+$ranNow = $false
+if (-not $Unattended) {
+    Write-Host 'Last question - setup can collect your data right now. A Microsoft'
+    Write-Host 'sign-in window will open (read-only, no password is stored), a live'
+    Write-Host 'progress page follows along, and the console opens when it is done.'
+    if (Ask-YesNo 'Collect your data now? (press Enter to start)' $true) {
+        $ranNow = $true
+        Write-Host ''
+        # Run EXACTLY what the "Refresh IT Ops Data" icon runs - one behaviour,
+        # not two - in a fresh process so this window's settings stay out of
+        # the collectors.
+        $runArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass',
+                     '-File', (Join-Path $consoleDir 'run-all.ps1'),
+                     '-ToolRoot', $tools, '-OutputRoot', $output, '-SitePath', $site)
+        if ($python) { $runArgs += @('-Python', $python) }
+        $engine = if ($onWindows) { 'powershell.exe' } else { 'pwsh' }
+        & $engine @runArgs
+        Write-Host ''
+        Write-Host 'From here on, "Refresh IT Ops Data" on your desktop is the whole'
+        Write-Host 'routine - run it on whatever rhythm suits you. The console shows how'
+        Write-Host 'old every number is, and says so loudly when data has gone stale.'
+    }
+}
+if (-not $ranNow) {
+    Write-Host ''
+    Write-Host 'Next: double-click "Refresh IT Ops Data" on your desktop, sign in when'
+    Write-Host 'asked, and when it finishes open "IT Ops Console". Do that on whatever'
+    Write-Host 'rhythm suits you - the console shows how old every number is, and says'
+    Write-Host 'so loudly when data has gone stale.'
+    Write-Host ''
 }
 if (-not $Unattended -and -not $env:ITOPS_CMD) {
     Write-Host ''
