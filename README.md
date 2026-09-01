@@ -66,6 +66,30 @@ that wrote `run-summary.json` is older than the history folder. Conditional
 Access, role assignments, licence purchases, app registrations, and Intune
 policies.
 
+## Posture over time
+
+A snapshot tells you where you are; a series tells you where you're heading.
+`run-all.ps1` archives a timestamped copy of `security-snapshot.json` and
+`licensing.json` after every successful run (into `output\history\security\`
+and `output\history\licensing\`, mirroring what entra-tenant-docs already does
+for itself), and the console turns those into small-multiple trend cards:
+
+- **Security → Posture over time:** MFA coverage, admins without MFA, stale
+  accounts, guests, legacy-auth sign-ins.
+- **Licensing → Waste over time:** unused seats, reclaim candidates, licensed
+  users — and, once your SKUs are priced, $/month unused and $/month
+  reclaimable.
+- **Overview tiles** (Security, Licensing) carry a sparkline and a
+  "since last" delta so direction shows at a glance.
+
+One point per calendar day (the latest run wins, so five refreshes in an
+afternoon don't make a spiky chart), and every metric knows which way is
+*good*: MFA coverage rising and waste falling read as improving (green, with a
+check and the words); the wrong direction reads amber; flat and neutral
+metrics stay muted. Never colour alone. With fewer than two days of data the
+section simply says trends appear after the second refresh. Snapshots
+accumulate (~150KB each) with no pruning yet — same as tenant-docs.
+
 ## Freshness is a first-class citizen
 
 A console that quietly shows last month's numbers is worse than no console.

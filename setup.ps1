@@ -250,6 +250,9 @@ history     = tenant-docs\history
 security    = security-snapshot.json
 licensing   = licensing.json
 fleet       = fleet.db
+# Refresh archives each run here, so the console can show posture over time.
+security_history  = history\security
+licensing_history = history\licensing
 "@
 Set-Content -Path (Join-Path $consoleDir 'sources.ini') -Value $sources -Encoding UTF8
 Write-Host "  wrote $((Join-Path $consoleDir 'sources.ini'))"

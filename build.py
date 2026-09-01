@@ -58,6 +58,10 @@ def main():
     models["licensing"] = model.licensing_model(feeds["licensing"])
     models["fleet"] = model.fleet_model(feeds["fleet"])
     models["changes"] = model.changes_model(feeds["history"], feeds.get("run_summary"))
+    # Posture over time: archived snapshots (run-all writes them) + the current
+    # one. Optional feeds - without them the pages simply have no trend section.
+    models["trends"] = model.trends_model(feeds.get("security_history"), feeds["security"],
+                                          feeds.get("licensing_history"), feeds["licensing"])
 
     available = {
         "index": True,
@@ -78,10 +82,12 @@ def main():
                                               available, generated)),
         write_page(args.out, "security",
                          pages.build_security(models["security"], feeds["security"],
-                                              available, generated)),
+                                              available, generated,
+                                              trend=models["trends"]["security"])),
         write_page(args.out, "licensing",
                          pages.build_licensing(models["licensing"], feeds["licensing"],
-                                               available, generated)),
+                                               available, generated,
+                                               trend=models["trends"]["licensing"])),
         write_page(args.out, "fleet",
                          pages.build_fleet(models["fleet"], feeds["fleet"],
                                            available, generated)),

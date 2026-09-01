@@ -310,6 +310,24 @@ function Invoke-Native {
     }
 }
 
+function Save-HistorySnapshot {
+    <# Archive a collector's JSON so the console can draw posture-over-time
+       trends - only when that step JUST succeeded, so a failed or stale file
+       never becomes a data point. Same idea entra-tenant-docs uses for itself;
+       done here, in the orchestrator, so the collectors stay simple. #>
+    param([string]$Step, [string]$Source, [string]$HistoryDir, [string]$Prefix)
+    $ok = @($results.ToArray() | Where-Object { $_.Step -eq $Step -and $_.Status -eq 'ok' }).Count -gt 0
+    if (-not $ok -or -not (Test-Path -LiteralPath $Source)) { return }
+    try {
+        $null = New-Item -ItemType Directory -Path $HistoryDir -Force
+        $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+        Copy-Item -LiteralPath $Source -Destination (Join-Path $HistoryDir "$Prefix-$stamp.json") -Force
+    } catch {
+        Write-Warning "Could not archive the $Prefix snapshot for trends ($($_.Exception.Message))."
+    }
+}
+$historyRoot = Join-Path $OutputRoot 'history'
+
 # --------------------------------------------------------------------------- #
 # Sign in once for all three Entra tools
 # --------------------------------------------------------------------------- #
@@ -394,6 +412,8 @@ Invoke-Step -Name 'entra-security-snapshot' -Skip:$SkipSecurity -StepKey 'securi
         StaleDays = $StaleDays
     }
 Update-StatsFromOutputs
+Save-HistorySnapshot -Step 'entra-security-snapshot' -Prefix 'security' `
+    -Source (Join-Path $OutputRoot 'security-snapshot.json') -HistoryDir (Join-Path $historyRoot 'security')
 
 # License prices auto-engage: a prices.ini sitting beside the license tool
 # means "put a dollar figure on the waste". Explicit -LicensePrices overrides.
@@ -411,6 +431,8 @@ Invoke-Step -Name 'm365-license-waste-report' -Skip:$SkipLicensing -StepKey 'lic
     -ScriptPath (Join-Path $licenseRepo 'Get-LicenseWasteReport.ps1') `
     -Arguments $licenseArgs
 Update-StatsFromOutputs
+Save-HistorySnapshot -Step 'm365-license-waste-report' -Prefix 'licensing' `
+    -Source (Join-Path $OutputRoot 'licensing.json') -HistoryDir (Join-Path $historyRoot 'licensing')
 
 # First-run convenience: if the license report ran and there is still no
 # prices.ini, list the tenant's real SKUs (blank values) so pricing is a
