@@ -340,6 +340,7 @@ $needGraph = -not ($SkipTenantDocs -and $SkipSecurity -and $SkipLicensing)
 if (-not ($needGraph -and -not $NoConnect)) {
     Set-StepState 'signin' 'skipped' -Detail 'Already signed in, or nothing to collect'
 }
+$script:GraphConnectedByUs = $false
 if ($needGraph -and -not $NoConnect) {
     Set-StepState 'signin' 'running'
     $scopes = @(
@@ -363,6 +364,7 @@ if ($needGraph -and -not $NoConnect) {
         Write-Host 'Connecting to Microsoft Graph (read-only scopes)...'
         Add-StatusLine 'signin' 'A Microsoft sign-in window is open - finish signing in there.'
         Connect-MgGraph -Scopes $scopes -NoWelcome
+        $script:GraphConnectedByUs = $true
     } else {
         Write-Host "Already connected as $($ctx.Account) - reusing that session."
         $missing = @($scopes | Where-Object { $_ -notin $ctx.Scopes })
@@ -532,6 +534,14 @@ if ($failed.Count -or $missing.Count) {
     }
 }
 Update-RefreshStatus -Done -Ok:(-not ($failed.Count -or $missing.Count)) -Summary $summaryLines -Force
+
+# Sign out of the Graph session we opened, so a shared machine doesn't keep a
+# live token cached after the refresh. Only if WE connected - a session you
+# started yourself (e.g. app-only with a certificate) is left for you to manage.
+if ($script:GraphConnectedByUs) {
+    try { Disconnect-MgGraph -ErrorAction Stop | Out-Null; Write-Host 'Signed out of Microsoft Graph.' }
+    catch { Write-Warning "Could not sign out of Graph cleanly ($($_.Exception.Message))." }
+}
 
 if ($failed.Count -or $missing.Count) {
     if ($consoleFailed) {
