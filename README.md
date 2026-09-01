@@ -47,7 +47,10 @@ snapshot flagged as needing attention.
 **Licensing** — SKUs sorted by unassigned seats, reclaim candidates split into
 disabled accounts (reclaim today) and stale accounts (ask first), and
 self-service consumption SKUs kept separate so they stop inflating the waste
-number.
+number. Add per-seat prices and it turns into dollars: unused-seat spend and
+reclaimable-now spend, per month and per year, leading the page and the
+overview tile. The first Refresh writes a `prices.ini` listing your own SKUs
+into the license tool's folder — fill in the numbers and Refresh again.
 
 **Print fleet** — devices sorted worst-first, toner levels as severity-coloured
 meters, a page-volume sparkline per device, and anything that has not reported

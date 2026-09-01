@@ -47,6 +47,12 @@
     The fleet database the collector appends to. Defaults to fleet.db in
     -OutputRoot, which is where setup's sources.ini already points.
 
+.PARAMETER LicensePrices
+    An INI of per-seat monthly prices, so the license report shows the waste in
+    dollars. Usually unnecessary: a prices.ini beside the license tool is used
+    automatically, and the first run writes a starter listing your own SKUs to
+    fill in. Pass this to point at a prices file kept somewhere else.
+
 .PARAMETER NoStatusPage
     Do not open the live progress page. Use for scheduled/headless runs; the
     console itself is built either way.
@@ -76,6 +82,7 @@ param(
     [string]$Python = 'python',
     [string]$FleetConfig,
     [string]$FleetDb,
+    [string]$LicensePrices,
     [switch]$SkipTenantDocs,
     [switch]$SkipSecurity,
     [switch]$SkipLicensing,
@@ -386,13 +393,53 @@ Invoke-Step -Name 'entra-security-snapshot' -Skip:$SkipSecurity -StepKey 'securi
     }
 Update-StatsFromOutputs
 
+# License prices auto-engage: a prices.ini sitting beside the license tool
+# means "put a dollar figure on the waste". Explicit -LicensePrices overrides.
+# After the run, if there is no prices.ini yet, we write a starter listing the
+# tenant's own SKUs so the next edit is fill-in-the-blanks, not SKU research.
+$licenseRepo = Join-Path $ToolRoot 'm365-license-waste-report'
+$pricesPath = if ($LicensePrices) { $LicensePrices } else { Join-Path $licenseRepo 'prices.ini' }
+$licenseArgs = @{
+    JsonPath  = (Join-Path $OutputRoot 'licensing.json')
+    StaleDays = $StaleDays
+}
+if (Test-Path $pricesPath) { $licenseArgs['PriceList'] = $pricesPath }
+
 Invoke-Step -Name 'm365-license-waste-report' -Skip:$SkipLicensing -StepKey 'licensing' `
-    -ScriptPath (Join-Path $ToolRoot 'm365-license-waste-report\Get-LicenseWasteReport.ps1') `
-    -Arguments @{
-        JsonPath  = (Join-Path $OutputRoot 'licensing.json')
-        StaleDays = $StaleDays
-    }
+    -ScriptPath (Join-Path $licenseRepo 'Get-LicenseWasteReport.ps1') `
+    -Arguments $licenseArgs
 Update-StatsFromOutputs
+
+# First-run convenience: if the license report ran and there is still no
+# prices.ini, list the tenant's real SKUs (blank values) so pricing is a
+# fill-in exercise. Never overwrite a file the user has touched.
+if (-not $SkipLicensing -and -not (Test-Path $pricesPath)) {
+    $licJson = Join-Path $OutputRoot 'licensing.json'
+    if (Test-Path $licJson) {
+        try {
+            $lic = Get-Content $licJson -Raw | ConvertFrom-Json
+            $skuList = @($lic.SkuSummary | ForEach-Object { "$($_.Sku)" } | Sort-Object -Unique)
+            if ($skuList.Count) {
+                $lines = New-Object System.Collections.Generic.List[string]
+                $lines.Add('# Per-seat MONTHLY price for each license SKU. Fill in the numbers')
+                $lines.Add('# next to your SKUs, then run "Refresh IT Ops Data" again - the')
+                $lines.Add('# console will then show the dollar waste. Skip any you do not care')
+                $lines.Add('# about; they keep showing seat counts. Text after ; or # is a comment.')
+                $lines.Add('')
+                $lines.Add('[settings]')
+                $lines.Add('currency = $')
+                $lines.Add('')
+                $lines.Add('[prices]')
+                foreach ($s in $skuList) { $lines.Add(('{0,-28} = ' -f $s)) }
+                Set-Content -Path $pricesPath -Value ($lines -join "`r`n") -Encoding UTF8
+                Write-Host "Wrote a price-list starter with your SKUs: $pricesPath"
+                Write-Host '  Add per-seat prices there and Refresh again to see dollar waste.'
+            }
+        } catch {
+            Write-Warning "Could not write the price-list starter ($($_.Exception.Message))."
+        }
+    }
+}
 
 # Printers auto-engage: a config.ini that differs from the shipped example is
 # a person saying "these are my printers", and the Refresh must just pick that
