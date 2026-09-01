@@ -159,6 +159,9 @@ ICONS = {
     "eye": '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></svg>',
 }
 
+# Set by build.py when a VERSION file ships beside it (release bundles do).
+SUITE_VERSION = ""
+
 PAGES = [
     ("index",     "Overview"),
     ("identity",  "Identity"),
@@ -279,10 +282,11 @@ def shell(title, current, available, body, generated, subtitle=""):
 <div class="wrap">
 <header class="page"><h1>%s</h1><div class="sub">%s</div></header>
 %s
-<footer>Built by <a href="https://github.com/JonathanT10/it-ops-console">it-ops-console</a>
+<footer>Built by <a href="https://github.com/JonathanT10/it-ops-console">it-ops-console</a>%s
 at %s (UTC) from the tools' own output. Each page is self-contained.</footer>
 </div></body></html>""" % (
-        esc(title), CSS, nav(current, available), esc(title), subtitle, body, esc(generated)
+        esc(title), CSS, nav(current, available), esc(title), subtitle, body,
+        (" (suite v%s)" % esc(SUITE_VERSION)) if SUITE_VERSION else "", esc(generated)
     )
 
 
