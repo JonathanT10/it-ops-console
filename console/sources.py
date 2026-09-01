@@ -73,13 +73,14 @@ def freshness(ts, fresh_hours=DEFAULT_FRESH_HOURS, stale_hours=DEFAULT_STALE_HOU
 class Feed:
     """One tool's output: what it is, whether it loaded, and how old it is."""
 
-    def __init__(self, key, label, path, data=None, error=None, ts=None):
+    def __init__(self, key, label, path, data=None, error=None, ts=None, missing=False):
         self.key = key
         self.label = label
         self.path = path
         self.data = data
         self.error = error
         self.ts = ts
+        self.missing = missing   # configured, but its tool has never written it
         self.state, self.age = freshness(ts)
 
     @property
@@ -90,9 +91,20 @@ class Feed:
     def status_note(self):
         if self.error:
             return self.error
+        if self.missing:
+            # "Never collected" is a normal state for an optional tool, and it
+            # must not read like a failure - the raw path stays available in
+            # the hint for whoever is actually debugging.
+            return "nothing collected yet"
         if not self.path:
             return "not configured"
         return self.age
+
+    @property
+    def hint(self):
+        if self.missing:
+            return "This page fills in once its tool has run. It reads: %s" % self.path
+        return ""
 
 
 def _load_json(path):
@@ -231,7 +243,10 @@ def load_all(config_path):
             continue
         path = raw if os.path.isabs(raw) else os.path.join(base or cfg_dir, raw)
         if not os.path.exists(path):
-            feeds[key] = Feed(key, label, path, error="file not found: %s" % path)
+            # Configured but never produced: the tool simply has not run yet.
+            # That is a normal state (printers are optional), distinct from a
+            # file that exists and cannot be read - which stays a real error.
+            feeds[key] = Feed(key, label, path, missing=True)
             continue
         try:
             data, ts = loader(path)

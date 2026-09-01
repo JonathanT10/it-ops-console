@@ -11,6 +11,20 @@ def _empty(msg, hint=""):
     return '<section><div class="empty">%s%s</div></section>' % (esc(msg), h)
 
 
+def _feed_empty(label, feed, how_to_turn_on):
+    """The empty page for a feed, in words matched to WHY it is empty.
+
+    Never collected is a normal state and must not read like a failure; a feed
+    that exists but cannot be read is a real error and stays one."""
+    if feed is not None and feed.error:
+        return _empty("%s data could not be read." % label, feed.error)
+    if feed is not None and getattr(feed, "missing", False):
+        return _empty("Nothing collected here yet.",
+                      how_to_turn_on + " " + feed.hint)
+    return _empty("%s data is not configured." % label,
+                  (feed.status_note if feed else ""))
+
+
 def _cards(items):
     out = []
     for it in items:
@@ -46,9 +60,10 @@ def build_overview(models, feeds, available, generated):
         f = feed
         if f is None or not f.ok:
             note = (f.status_note if f else "not configured")
+            head = "Nothing yet" if (f is not None and getattr(f, "missing", False)) else "Not configured"
             return ('<div class="tile off"><div class="top"><span class="title">%s</span></div>'
-                    '<div class="headline">Not configured</div>'
-                    '<div class="sub">%s</div></div>' % (esc(title), esc(note)))
+                    '<div class="headline">%s</div>'
+                    '<div class="sub">%s</div></div>' % (esc(title), esc(head), esc(note)))
         return ('<a class="tile" href="%s.html"><div class="top"><span class="title">%s</span>%s</div>'
                 '<div class="headline">%s</div><div class="sub">%s</div>'
                 '<div class="foot"><span class="dot %s"></span>%s</div></a>'
@@ -179,8 +194,8 @@ def build_overview(models, feeds, available, generated):
 def build_identity(m, feed, available, generated):
     if not m:
         return shell("Identity", "identity", available,
-                     _empty("Identity data is not configured.",
-                            feed.status_note if feed else ""), generated)
+                     _feed_empty("Identity", feed,
+                                 "Run Export-EntraTenantDocs.ps1 (the Refresh shortcut does this for you)."), generated)
     cards = _cards([
         {"k": "Members", "v": m["members"], "d": "%s enabled" % m["enabled_members"]},
         {"k": "Guests", "v": m["guests"]},
@@ -297,8 +312,8 @@ def build_identity(m, feed, available, generated):
 def build_security(m, feed, available, generated):
     if not m:
         return shell("Security", "security", available,
-                     _empty("Security snapshot is not configured.",
-                            feed.status_note if feed else ""), generated)
+                     _feed_empty("Security", feed,
+                                 "Run Get-EntraSecuritySnapshot.ps1 (the Refresh shortcut does this for you)."), generated)
     mfa = m["mfa"] or {}
     cards = _cards([
         {"k": "MFA coverage", "v": ("%s%%" % mfa.get("percent")) if mfa.get("percent") is not None else "-",
@@ -362,9 +377,9 @@ def build_security(m, feed, available, generated):
 def build_licensing(m, feed, available, generated):
     if not m:
         return shell("Licensing", "licensing", available,
-                     _empty("License report is not configured.",
-                            (feed.status_note if feed else "") or
-                            "Run Get-LicenseWasteReport.ps1 with -JsonPath to produce the feed."),
+                     _feed_empty("Licensing", feed,
+                                 "Run Get-LicenseWasteReport.ps1 with -JsonPath "
+                                 "(the Refresh shortcut does this for you)."),
                      generated)
     cards = _cards([
         {"k": "Unassigned seats", "v": m["unassigned_total"], "d": "across real SKUs"},
@@ -419,8 +434,9 @@ def build_licensing(m, feed, available, generated):
 def build_fleet(m, feed, available, generated):
     if not m:
         return shell("Print fleet", "fleet", available,
-                     _empty("Print fleet database is not configured.",
-                            feed.status_note if feed else ""), generated)
+                     _feed_empty("Print fleet", feed,
+                                 "Printers are optional. To turn this on, put their IPs in "
+                                 "print-fleet-dashboard's config.ini and run its collector once."), generated)
     cards = _cards([
         {"k": "Devices online", "v": "%d/%d" % (m["online"], m["total"])},
         {"k": "Need attention", "v": len(m["attention"])},
@@ -475,9 +491,9 @@ KINDWORD = {"added": "Added", "removed": "Removed", "changed": "Changed"}
 def build_changes(m, feed, available, generated):
     if not m:
         return shell("What changed", "changes", available,
-                     _empty("Snapshot history is not configured.",
-                            (feed.status_note if feed else "") or
-                            "Point sources.ini at the tenant-docs history/ folder."), generated)
+                     _feed_empty("Change history", feed,
+                                 "It appears after the tenant has been documented twice - "
+                                 "there is nothing to compare until then."), generated)
     if not m["events"]:
         body = (freshness_chip(feed.state, feed.age, "History") +
                 '<section><div class="empty">No configuration changes detected across %d '
