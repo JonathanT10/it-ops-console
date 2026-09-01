@@ -245,6 +245,84 @@ def test_licensing_costing_render():
     check("costing: no-costing page hints at prices.ini", "prices.ini" in pn)
 
 
+def test_next_steps():
+    """Every finding carries a plain-English next step, wherever it appears."""
+    # The mapping itself: every CA gap id the analysis can emit has an action,
+    # and unknown kinds degrade to empty rather than exploding.
+    ids = ("mfa-all-users", "block-legacy-auth", "admin-mfa", "baseline-exists",
+           "breakglass-exclusion", "guest-protection", "risk-policies", "device-grants",
+           "report-only-lingering", "unused-locations")
+    check("next_step: every CA gap id has an action", all(pages.CA_GAP_ACTION.get(i) for i in ids))
+    check("next_step: unknown gap id still gets a generic action",
+          "Conditional Access" in pages.next_step("ca-gap", "no-such-check"))
+    check("next_step: unknown kind is empty, not an error", pages.next_step("nonsense") == "")
+    check("next_step: fleet distinguishes offline / warning / error",
+          "network" in pages.next_step("fleet", "offline")
+          and "Restock" in pages.next_step("fleet", "warning")
+          and "panel" in pages.next_step("fleet", "error"))
+
+    avail = {k: True for k in ("index", "identity", "security", "licensing", "fleet", "changes")}
+    gen = "2026-01-01 00:00:00"
+
+    # Identity: a failing gap carries its id-specific action; a passing one carries none.
+    tenant = Feed("tenant", "Identity", "x", data={
+        "GeneratedUtc": iso(NOW), "Organization": {"DisplayName": "T"},
+        "UserCounts": {"Members": 1, "EnabledMembers": 1, "Guests": 0},
+        "ConditionalAccess": {"Policies": [], "NamedLocations": []},
+        "CaGaps": [
+            {"Id": "breakglass-exclusion", "Title": "Break-glass accounts excluded",
+             "Severity": "warning", "Result": "fail", "Detail": "no exclusions"},
+            {"Id": "mfa-all-users", "Title": "MFA required for all users",
+             "Severity": "critical", "Result": "pass", "Detail": "satisfied"}],
+        "Roles": [], "Groups": {}, "AuthMethods": [], "UserSettings": {},
+        "Applications": [], "Intune": {"Available": False}}, ts=NOW)
+    ident = model.identity_model(tenant)
+    page = pages.build_identity(ident, tenant, avail, gen)
+    check("next_step: failing gap shows its specific action",
+          "break-glass (emergency) accounts" in page)
+    check("next_step: passing gap shows no action",
+          "requires MFA for all users on all cloud apps" not in page)
+
+    # Overview: the Needs-a-human item for that gap carries the same action line,
+    # and an admin-without-MFA item carries the MFA action.
+    sec = Feed("security", "Security", "x", data={
+        "GeneratedUtc": iso(NOW), "StaleDays": 90,
+        "AdminsWithoutMfa": [{"DisplayName": "Root Admin", "UserPrincipalName": "r@x",
+                              "Roles": "Global Administrator"}],
+        "RoleSummary": [], "StaleMembers": [], "Guests": {"Total": 0},
+        "LegacyAuth": {"Available": False}, "NeedsAttention": []}, ts=NOW)
+    secm = model.security_model(sec, ident)
+    ov = pages.build_overview(
+        {"identity": ident, "security": secm, "licensing": None, "fleet": None, "changes": None},
+        {"tenant": tenant, "security": sec, "licensing": sec, "history": sec, "fleet": sec},
+        avail, gen)
+    check("next_step: overview items carry an action line", 'class="act"' in ov)
+    check("next_step: overview admin-without-MFA carries the MFA action",
+          "aka.ms/mfasetup" in ov)
+    check("next_step: overview CA gap carries its specific action",
+          "break-glass (emergency) accounts" in ov)
+
+    # Security page notes carry their actions.
+    sp = pages.build_security(secm, sec, avail, gen)
+    check("next_step: security admins note carries the action", "aka.ms/mfasetup" in sp)
+    check("next_step: security stale note carries the action", "disable the account" in sp)
+
+    # Fleet: the Needs-attention table gains a What-to-do column with the
+    # status-specific line (an offline device here).
+    old = iso(NOW - timedelta(days=5))
+    fleet = Feed("fleet", "Print fleet", "x", data={"devices": [{
+        "device": {"id": 1, "ip": "10.0.0.9", "name": "Lobby", "model": "M", "serial": "S",
+                   "first_seen": old, "last_seen": old},
+        "snapshot": {"id": 1, "device_id": 1, "ts": old, "reachable": 0, "status": "offline",
+                     "detail": "No SNMP response", "uptime_seconds": None, "page_count": None},
+        "supplies": [], "volumes": []}]}, ts=NOW)
+    fm = model.fleet_model(fleet)
+    fp = pages.build_fleet(fm, fleet, avail, gen)
+    check("next_step: fleet table has a What-to-do column", "<th>What to do</th>" in fp)
+    check("next_step: offline device gets the power/network line",
+          "powered on and on the network" in fp)
+
+
 def test_fleet_model(tmp):
     db = os.path.join(tmp, "fleet.db")
     conn = sqlite3.connect(db)
@@ -425,6 +503,7 @@ def main():
         test_identity_model()
         test_licensing_model()
         test_licensing_costing_render()
+        test_next_steps()
         test_fleet_model(tmp)
         test_changes_model()
         test_render_empty_console()
