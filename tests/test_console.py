@@ -307,6 +307,20 @@ def test_render_empty_console():
     check("render: the hint still names the path for whoever debugs",
           "fleet.db" in page)
 
+    # Release bundles stamp a VERSION; the footer must carry it - and a plain
+    # git checkout must not invent one.
+    from console import render as _r
+    try:
+        _r.SUITE_VERSION = "9.9.9-test"
+        page_v = pages.build_fleet(None, f2["fleet"], {"index": True}, "now")
+        check("render: suite version appears in the footer when set",
+              "suite v9.9.9-test" in page_v)
+    finally:
+        _r.SUITE_VERSION = ""
+    page_nv = pages.build_fleet(None, f2["fleet"], {"index": True}, "now")
+    check("render: no suite version invented without a VERSION file",
+          "suite v" not in page_nv)
+
 
 def test_render_escaping():
     tenant = Feed("tenant", "Identity", "x", data={
