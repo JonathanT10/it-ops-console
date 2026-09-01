@@ -91,7 +91,10 @@ def test_loading(tmp):
     check("load: good feed ok", feeds["tenant"].ok)
     check("load: corrupt feed carries error, does not raise",
           not feeds["security"].ok and "JSONDecodeError" in (feeds["security"].error or ""))
-    check("load: missing file reported", "file not found" in (feeds["licensing"].error or ""))
+    check("load: a configured-but-never-produced feed is 'missing', not an error",
+          feeds["licensing"].missing and feeds["licensing"].error is None
+          and feeds["licensing"].status_note == "nothing collected yet"
+          and "missing.json" in feeds["licensing"].hint)
     check("load: unconfigured feed is not an error",
           not feeds["fleet"].ok and feeds["fleet"].error is None
           and feeds["fleet"].status_note == "not configured")
@@ -285,6 +288,24 @@ def test_render_empty_console():
           "not configured" in out["identity"].lower())
     check("render: nav present on every page",
           all('nav class="top"' in h for h in out.values()))
+
+    # A configured-but-never-collected feed reads as a normal state with a
+    # turn-it-on hint - never as a raw "file not found" error.
+    tmp2 = tempfile.mkdtemp(prefix="console-missing-")
+    fdir = os.path.join(tmp2, "feeds2"); os.makedirs(fdir, exist_ok=True)
+    cfg2 = os.path.join(tmp2, "sources2.ini")
+    with open(cfg2, "w") as fh:
+        fh.write("[console]\nbase_path = %s\n\n[sources]\n"
+                 "tenant =\nsecurity =\nlicensing =\nrun_summary =\nhistory =\n"
+                 "fleet = fleet.db\n" % fdir)
+    _c2, f2 = load_all(cfg2)
+    page = pages.build_fleet(None, f2["fleet"], {"index": True}, "now")
+    check("render: never-collected fleet page uses calm words",
+          "Nothing collected here yet." in page and "Printers are optional" in page)
+    check("render: never-collected fleet page has no raw file-not-found error",
+          "file not found" not in page.lower())
+    check("render: the hint still names the path for whoever debugs",
+          "fleet.db" in page)
 
 
 def test_render_escaping():
