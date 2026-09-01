@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refreshing your IT data</title>
+<style>
+:root {
+  color-scheme: light;
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --border:rgba(11,11,11,.10);
+  --accent:#2a78d6; --accent-deep:#1c5cab;
+  --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --border:rgba(255,255,255,.10); --accent:#3987e5; --accent-deep:#86b6ef;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --border:rgba(255,255,255,.10); --accent:#3987e5; --accent-deep:#86b6ef;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:28px 20px 48px}
+h1{font-size:21px;font-weight:650;margin:0 0 2px}
+.sub{color:var(--ink-2);font-size:13px;margin-bottom:18px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:14px}
+.railwrap{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.rail{flex:1;height:8px;border-radius:4px;overflow:hidden;background:color-mix(in oklab,var(--accent) 16%,var(--surface))}
+.rail .fill{height:100%;border-radius:4px;background:var(--accent);transition:width .6s ease}
+.rail-lbl{font-size:12px;color:var(--ink-2);font-variant-numeric:tabular-nums;white-space:nowrap}
+.step{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--grid)}
+.step:last-child{border-bottom:none}
+.step .ic{flex:none;width:22px;height:22px;margin-top:1px}
+.step .body{flex:1;min-width:0}
+.step .t{font-size:13.5px;font-weight:600}
+.step .d{font-size:12.5px;color:var(--muted)}
+.step .now{font-size:12px;color:var(--accent-deep);font-family:ui-monospace,Consolas,monospace;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step .secs{flex:none;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:2px}
+.ic svg{width:22px;height:22px;display:block}
+.spin{width:18px;height:18px;margin:2px;border-radius:50%;
+  border:2.5px solid color-mix(in oklab,var(--accent) 25%,var(--surface));
+  border-top-color:var(--accent);animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{background:var(--surface);border:1px solid var(--border);border-radius:999px;
+  padding:6px 12px;font-size:12.5px;color:var(--ink-2);animation:pop .3s ease}
+.chip b{color:var(--ink);font-variant-numeric:tabular-nums}
+@keyframes pop{from{transform:scale(.9);opacity:0}}
+.log{background:var(--page);border:1px solid var(--border);border-radius:8px;padding:10px 12px;
+  font:11.5px/1.6 ui-monospace,Consolas,monospace;color:var(--ink-2);
+  height:150px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
+h2{font-size:13px;font-weight:650;margin:0 0 8px}
+.done{border-left:3px solid var(--good)}
+.done.bad{border-left-color:var(--critical)}
+.done p{margin:6px 0;font-size:13.5px}
+.btn{display:inline-block;margin-top:10px;padding:10px 18px;border-radius:8px;background:var(--accent);
+  color:#fff;text-decoration:none;font-weight:600;font-size:14px}
+.btn:hover{background:var(--accent-deep)}
+.closenote{font-size:12px;color:var(--muted);margin-top:10px}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Refreshing your IT data</h1>
+  <div class="sub">Read-only collection from Microsoft 365, then your console is rebuilt. Leave this page open &mdash; it updates by itself.</div>
+  <div class="railwrap"><div class="rail"><div class="fill" id="fill" style="width:3%"></div></div><div class="rail-lbl" id="raillbl">starting&hellip;</div></div>
+  <div class="card" id="steps"></div>
+  <div class="card" id="statscard" hidden><h2>What we know so far</h2><div class="chips" id="chips"></div></div>
+  <div class="card" id="logcard"><h2>Live activity</h2><div class="log" id="log">waiting for the first step&hellip;</div></div>
+  <div class="card done" id="donecard" hidden></div>
+</div>
+<script>
+var ICONS = {
+  pending:'<svg viewBox="0 0 22 22" fill="none" stroke="var(--muted)" stroke-width="2"><circle cx="11" cy="11" r="8" opacity=".45"/></svg>',
+  ok:'<svg viewBox="0 0 22 22" fill="none" stroke="var(--good)" stroke-width="2.4"><circle cx="11" cy="11" r="8.5" opacity=".35"/><path d="M7 11.5l2.8 2.8L15 8.5"/></svg>',
+  failed:'<svg viewBox="0 0 22 22" fill="none" stroke="var(--critical)" stroke-width="2"><path d="M11 3L20.5 19.5H1.5L11 3z"/><path d="M11 9v4.4"/><circle cx="11" cy="16.4" r=".7" fill="var(--critical)"/></svg>',
+  missing:'<svg viewBox="0 0 22 22" fill="none" stroke="var(--critical)" stroke-width="2"><path d="M11 3L20.5 19.5H1.5L11 3z"/><path d="M11 9v4.4"/><circle cx="11" cy="16.4" r=".7" fill="var(--critical)"/></svg>',
+  skipped:'<svg viewBox="0 0 22 22" fill="none" stroke="var(--muted)" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M7 11h8"/></svg>',
+  running:'<div class="spin"></div>'
+};
+var esc = function (s) { return String(s == null ? '' : s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+var n = 0, lastPayload = '';
+function poll() {
+  var el = document.createElement('script');
+  el.src = 'progress.js?v=' + (n++);
+  el.onload = function () { render(); el.remove(); };
+  el.onerror = function () { el.remove(); };  // mid-write or not started yet
+  document.head.appendChild(el);
+}
+function render() {
+  var P = window.PROGRESS;
+  if (!P || !P.steps) { return; }
+  var asText = JSON.stringify(P);
+  if (asText === lastPayload) { return; }
+  lastPayload = asText;
+
+  var total = P.steps.length, doneCount = 0;
+  P.steps.forEach(function (s) { if (s.state !== 'pending' && s.state !== 'running') doneCount++; });
+  var pct = P.done ? 100 : Math.max(3, Math.round(100 * doneCount / Math.max(1, total)) - 4);
+  document.getElementById('fill').style.width = pct + '%';
+  document.getElementById('raillbl').textContent = P.done ? 'finished' : (doneCount + ' of ' + total + ' steps done');
+
+  document.getElementById('steps').innerHTML = P.steps.map(function (s) {
+    var now = (s.state === 'running' && s.now) ? '<div class="now">now: ' + esc(s.now) + '</div>' : '';
+    var secs = (s.seconds != null && s.state !== 'pending' && s.state !== 'skipped')
+      ? '<div class="secs">' + Math.round(s.seconds) + 's</div>' : '';
+    return '<div class="step"><div class="ic">' + (ICONS[s.state] || ICONS.pending) + '</div>' +
+      '<div class="body"><div class="t">' + esc(s.label) + '</div>' +
+      '<div class="d">' + esc(s.detail || '') + '</div>' + now + '</div>' + secs + '</div>';
+  }).join('');
+
+  var chips = (P.stats || []);
+  document.getElementById('statscard').hidden = chips.length === 0;
+  document.getElementById('chips').innerHTML = chips.map(function (c) {
+    return '<span class="chip"><b>' + esc(c.v) + '</b> ' + esc(c.k) + '</span>';
+  }).join('');
+
+  var lg = document.getElementById('log');
+  lg.textContent = (P.log || []).join('\n') || '…';
+  lg.scrollTop = lg.scrollHeight;
+  document.getElementById('logcard').hidden = !!P.done;
+
+  var dc = document.getElementById('donecard');
+  if (P.done) {
+    dc.hidden = false;
+    dc.className = 'card done' + (P.ok ? '' : ' bad');
+    dc.innerHTML = '<h2>' + (P.ok ? 'All done' : 'Finished, with problems') + '</h2>' +
+      (P.summary || []).map(function (l) { return '<p>' + esc(l) + '</p>'; }).join('') +
+      '<a class="btn" href="index.html">Open your console</a>' +
+      '<div class="closenote">You can close this page. Run &ldquo;Refresh IT Ops Data&rdquo; again any time &mdash; the console always shows how old its numbers are.</div>';
+  } else { dc.hidden = true; }
+}
+setInterval(poll, 1000);
+poll();
+</script>
+</body>
+</html>

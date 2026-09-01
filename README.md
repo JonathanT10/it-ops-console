@@ -87,7 +87,14 @@ already points at everything else, and puts two shortcuts on your desktop:
 
 - **Refresh IT Ops Data** — runs every collector (you sign in when asked),
   then rebuilds the console. Double-click it on whatever rhythm suits you.
+  A live progress page opens in your browser while it works: each step with
+  a spinner and plain-English label, the collector's own activity streaming
+  underneath, and stat chips appearing as data lands — then a plain-English
+  finish with one button to open the console. (`-NoStatusPage` for
+  scheduled runs.)
 - **IT Ops Console** — opens the result in your browser.
+
+![Refresh progress](docs/refresh-status.png)
 
 Nothing stores a password: collection is read-only and you sign in
 interactively each refresh. Works in Windows PowerShell 5.1 — the one

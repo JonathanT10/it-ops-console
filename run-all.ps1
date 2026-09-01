@@ -46,6 +46,10 @@
 .PARAMETER FleetDb
     The fleet database the collector appends to. Must match sources.ini.
 
+.PARAMETER NoStatusPage
+    Do not open the live progress page. Use for scheduled/headless runs; the
+    console itself is built either way.
+
 .PARAMETER NoConnect
     Skip the up-front Connect-MgGraph - use when you are already connected, or
     when running app-only with a certificate you connect with yourself.
@@ -75,7 +79,8 @@ param(
     [switch]$SkipSecurity,
     [switch]$SkipLicensing,
     [switch]$SkipFleet,
-    [switch]$NoConnect
+    [switch]$NoConnect,
+    [switch]$NoStatusPage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,151 +101,6 @@ function Add-Result {
         Step = $Name; Status = $Status; Seconds = [math]::Round($Seconds, 1); Detail = $Detail
     })
 }
-
-function Invoke-Step {
-    <# Runs one collector, times it, and turns a failure into a recorded result
-       rather than an aborted run. #>
-    param(
-        [string]$Name,
-        [string]$ScriptPath,
-        [hashtable]$Arguments,
-        [switch]$Skip
-    )
-    if ($Skip) { Add-Result $Name 'skipped'; return }
-    if (-not (Test-Path -LiteralPath $ScriptPath)) {
-        Add-Result $Name 'missing' "not found: $ScriptPath"
-        Write-Warning "$Name - script not found at $ScriptPath"
-        return
-    }
-    Write-Host ''
-    Write-Host "--- $Name ".PadRight(72, '-')
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    try {
-        & $ScriptPath @Arguments | Out-Null
-        $sw.Stop()
-        Add-Result $Name 'ok' '' $sw.Elapsed.TotalSeconds
-    } catch {
-        $sw.Stop()
-        Add-Result $Name 'FAILED' $_.Exception.Message $sw.Elapsed.TotalSeconds
-        Write-Warning "$Name failed: $($_.Exception.Message)"
-    }
-}
-
-function Invoke-Native {
-    param([string]$Name, [string]$Exe, [string[]]$NativeArgs, [string]$WorkDir, [switch]$Skip)
-    if ($Skip) { Add-Result $Name 'skipped'; return }
-    Write-Host ''
-    Write-Host "--- $Name ".PadRight(72, '-')
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $prev = Get-Location
-    try {
-        if ($WorkDir) { Set-Location -LiteralPath $WorkDir }
-        & $Exe @NativeArgs
-        $code = $LASTEXITCODE
-        $sw.Stop()
-        if ($code -ne 0) {
-            Add-Result $Name 'FAILED' "exit code $code" $sw.Elapsed.TotalSeconds
-            Write-Warning "$Name exited with code $code"
-        } else {
-            Add-Result $Name 'ok' '' $sw.Elapsed.TotalSeconds
-        }
-    } catch {
-        $sw.Stop()
-        Add-Result $Name 'FAILED' $_.Exception.Message $sw.Elapsed.TotalSeconds
-        Write-Warning "$Name failed: $($_.Exception.Message)"
-    } finally {
-        Set-Location $prev
-    }
-}
-
-# --------------------------------------------------------------------------- #
-# Sign in once for all three Entra tools
-# --------------------------------------------------------------------------- #
-
-$needGraph = -not ($SkipTenantDocs -and $SkipSecurity -and $SkipLicensing)
-
-if ($needGraph -and -not $NoConnect) {
-    $scopes = @(
-        'Directory.Read.All'
-        'Policy.Read.All'
-        'RoleManagement.Read.Directory'
-        'Application.Read.All'
-        'Organization.Read.All'
-        'User.Read.All'
-        'AuditLog.Read.All'
-        'DeviceManagementConfiguration.Read.All'
-        'DeviceManagementManagedDevices.Read.All'
-        'DeviceManagementApps.Read.All'
-    )
-    if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
-        throw "Microsoft.Graph.Authentication is not installed. Run: Install-Module Microsoft.Graph -Scope CurrentUser"
-    }
-    Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
-    $ctx = Get-MgContext
-    if (-not $ctx) {
-        Write-Host 'Connecting to Microsoft Graph (read-only scopes)...'
-        Connect-MgGraph -Scopes $scopes -NoWelcome
-    } else {
-        Write-Host "Already connected as $($ctx.Account) - reusing that session."
-        $missing = @($scopes | Where-Object { $_ -notin $ctx.Scopes })
-        if ($missing.Count) {
-            Write-Warning ("Current session is missing: {0}" -f ($missing -join ', '))
-            Write-Warning 'Some sections may come back empty. Disconnect-MgGraph and re-run to get all scopes.'
-        }
-    }
-}
-
-$null = New-Item -ItemType Directory -Path $OutputRoot -Force
-
-# --------------------------------------------------------------------------- #
-# Collectors
-# --------------------------------------------------------------------------- #
-
-Invoke-Step -Name 'entra-tenant-docs' -Skip:$SkipTenantDocs `
-    -ScriptPath (Join-Path $ToolRoot 'entra-tenant-docs\Export-EntraTenantDocs.ps1') `
-    -Arguments @{ OutputPath = (Join-Path $OutputRoot 'tenant-docs') }
-
-Invoke-Step -Name 'entra-security-snapshot' -Skip:$SkipSecurity `
-    -ScriptPath (Join-Path $ToolRoot 'entra-security-snapshot\Get-EntraSecuritySnapshot.ps1') `
-    -Arguments @{
-        JsonPath  = (Join-Path $OutputRoot 'security-snapshot.json')
-        StaleDays = $StaleDays
-    }
-
-Invoke-Step -Name 'm365-license-waste-report' -Skip:$SkipLicensing `
-    -ScriptPath (Join-Path $ToolRoot 'm365-license-waste-report\Get-LicenseWasteReport.ps1') `
-    -Arguments @{
-        JsonPath  = (Join-Path $OutputRoot 'licensing.json')
-        StaleDays = $StaleDays
-    }
-
-# The printer collector usually runs on its own short timer; only poll here if
-# the caller actually pointed us at a config.
-$fleetRepo = Join-Path $ToolRoot 'print-fleet-dashboard'
-$doFleet = -not $SkipFleet -and $FleetConfig -and $FleetDb
-if ($doFleet) {
-    Invoke-Native -Name 'print-fleet-collector' -Exe $Python -WorkDir $fleetRepo `
-        -NativeArgs @('collector.py', '--config', $FleetConfig, '--db', $FleetDb)
-} elseif ($SkipFleet) {
-    Add-Result 'print-fleet-collector' 'skipped'
-} else {
-    Add-Result 'print-fleet-collector' 'skipped' 'no -FleetConfig/-FleetDb given'
-}
-
-# --------------------------------------------------------------------------- #
-# Build the console
-# --------------------------------------------------------------------------- #
-
-if (-not (Test-Path -LiteralPath $ConfigPath)) {
-    throw "Console config not found: $ConfigPath (copy sources.example.ini to sources.ini and edit the paths)"
-}
-
-Invoke-Native -Name 'console build' -Exe $Python -WorkDir $PSScriptRoot `
-    -NativeArgs @('build.py', '--config', $ConfigPath, '--out', $SitePath)
-
-# --------------------------------------------------------------------------- #
-# Summary
-# --------------------------------------------------------------------------- #
 
 function Get-PlainWords {
     # Turn the most common failure texts into a sentence a non-technical
@@ -263,6 +123,305 @@ function Get-PlainWords {
     }
     return $null
 }
+
+# --------------------------------------------------------------------------- #
+# Live progress page. run-all streams every collector's output into
+# $SitePath\progress.js; refresh-status.html (copied next to it) polls that
+# file once a second and renders the run - steps, live activity, stats, and a
+# plain-English finish. The task stays simple; the progress looks like work.
+# --------------------------------------------------------------------------- #
+
+$script:StatusEnabled = $false
+$script:StatusDone = $false
+$script:StatusOk = $true
+$script:StatusSummary = @()
+$script:StatusStats = @()
+$script:StatusLog = New-Object System.Collections.Generic.List[string]
+$script:StatusLastWrite = Get-Date '2000-01-01'
+$script:StatusJsPath = $null
+$script:StatusSteps = @(
+    [pscustomobject]@{ key='signin';    label='Signing you in';                      detail='A Microsoft sign-in window opens - read-only access'; state='pending'; seconds=$null; now=$null }
+    [pscustomobject]@{ key='tenant';    label='Documenting your Microsoft 365 setup'; detail='Users, sign-in policies, groups, apps, devices';       state='pending'; seconds=$null; now=$null }
+    [pscustomobject]@{ key='security';  label='Checking security posture';            detail='MFA coverage, admin accounts, stale accounts, legacy sign-ins'; state='pending'; seconds=$null; now=$null }
+    [pscustomobject]@{ key='licensing'; label='Reviewing licenses';                   detail='Paid seats nobody is using';                            state='pending'; seconds=$null; now=$null }
+    [pscustomobject]@{ key='fleet';     label='Polling printers';                     detail='Optional - only when printers are configured';          state='pending'; seconds=$null; now=$null }
+    [pscustomobject]@{ key='build';     label='Building your console';                detail='Turning everything into readable pages';                state='pending'; seconds=$null; now=$null }
+)
+
+function Update-RefreshStatus {
+    param([switch]$Force, [switch]$Done, [bool]$Ok = $true, [string[]]$Summary = @())
+    if (-not $script:StatusEnabled) { return }
+    $nowT = Get-Date
+    if (-not $Force -and -not $Done -and ($nowT - $script:StatusLastWrite).TotalMilliseconds -lt 600) { return }
+    $script:StatusLastWrite = $nowT
+    if ($Done) { $script:StatusDone = $true; $script:StatusOk = $Ok; $script:StatusSummary = @($Summary) }
+    $payload = [ordered]@{
+        done    = $script:StatusDone
+        ok      = $script:StatusOk
+        summary = @($script:StatusSummary)
+        steps   = @($script:StatusSteps | ForEach-Object {
+            [ordered]@{ key=$_.key; label=$_.label; detail=$_.detail; state=$_.state; seconds=$_.seconds; now=$_.now } })
+        stats   = @($script:StatusStats)
+        log     = @(@($script:StatusLog.ToArray()) | Select-Object -Last 30)
+    }
+    try {
+        ('window.PROGRESS = ' + ($payload | ConvertTo-Json -Depth 6 -Compress) + ';') |
+            Set-Content -Path $script:StatusJsPath -Encoding UTF8
+    } catch { }
+}
+
+function Set-StepState {
+    param([string]$Key, [string]$State, [string]$Detail, $Seconds, [string]$Plain)
+    $s = $script:StatusSteps | Where-Object { $_.key -eq $Key }
+    if (-not $s) { return }
+    $s.state = $State
+    if ($Detail) { $s.detail = $Detail }
+    if ($null -ne $Seconds) { $s.seconds = [math]::Round([double]$Seconds, 1) }
+    if ($Plain) { $s.detail = $Plain }
+    Update-RefreshStatus -Force
+}
+
+function Add-StatusLine {
+    param([string]$Key, [string]$Line)
+    if (-not $script:StatusEnabled) { return }
+    $script:StatusLog.Add($Line)
+    if ($script:StatusLog.Count -gt 200) { $script:StatusLog.RemoveRange(0, $script:StatusLog.Count - 200) }
+    $s = $script:StatusSteps | Where-Object { $_.key -eq $Key }
+    if ($s) { $s.now = $Line }
+    Update-RefreshStatus
+}
+
+function Update-StatsFromOutputs {
+    # Re-read whatever output files exist and rebuild the stat chips. Called
+    # after each step; cheap, idempotent, and always consistent with disk.
+    if (-not $script:StatusEnabled) { return }
+    $stats = New-Object System.Collections.Generic.List[object]
+    try {
+        $rs = Get-Content (Join-Path (Join-Path $OutputRoot 'tenant-docs') 'run-summary.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+        $k = $rs.Kpis
+        if ($null -ne $k.Members)          { $stats.Add(@{ v = $k.Members; k = 'people' }) }
+        if ($null -ne $k.CaTotal)          { $stats.Add(@{ v = "$($k.CaEnabled) of $($k.CaTotal)"; k = 'sign-in policies enforced' }) }
+        if ($null -ne $k.AppRegistrations) { $stats.Add(@{ v = $k.AppRegistrations; k = 'registered apps' }) }
+        if ($k.EnrolledDevices)            { $stats.Add(@{ v = $k.EnrolledDevices; k = 'managed devices' }) }
+        if ($k.CredsExpired)               { $stats.Add(@{ v = $k.CredsExpired; k = 'expired app credentials' }) }
+    } catch { }
+    try {
+        $ss = Get-Content (Join-Path $OutputRoot 'security-snapshot.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($null -ne $ss.MfaCoverage.CoveragePercent) { $stats.Add(@{ v = "$($ss.MfaCoverage.CoveragePercent)%"; k = 'MFA coverage' }) }
+        $na = @($ss.NeedsAttention).Count
+        if ($na) { $stats.Add(@{ v = $na; k = 'security items to review' }) }
+    } catch { }
+    try {
+        $lj = Get-Content (Join-Path $OutputRoot 'licensing.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($null -ne $lj.LicensedUsers) { $stats.Add(@{ v = $lj.LicensedUsers; k = 'licensed people' }) }
+        $un = 0; foreach ($r in @($lj.SkuSummary)) { $un += [int]$r.Unassigned }
+        if ($un) { $stats.Add(@{ v = $un; k = 'unused paid seats' }) }
+        $rc = @($lj.ReclaimCandidates).Count
+        if ($rc) { $stats.Add(@{ v = $rc; k = 'licenses to review' }) }
+    } catch { }
+    $script:StatusStats = @($stats.ToArray())
+    Update-RefreshStatus -Force
+}
+
+function Invoke-Step {
+    <# Runs one collector, times it, and turns a failure into a recorded result
+       rather than an aborted run. #>
+    param(
+        [string]$Name,
+        [string]$ScriptPath,
+        [hashtable]$Arguments,
+        [switch]$Skip,
+        [string]$StepKey
+    )
+    if ($Skip) { Add-Result $Name 'skipped'; Set-StepState $StepKey 'skipped'; return }
+    if (-not (Test-Path -LiteralPath $ScriptPath)) {
+        Add-Result $Name 'missing' "not found: $ScriptPath"
+        Set-StepState $StepKey 'missing' -Plain (Get-PlainWords $Name "not found: $ScriptPath")
+        Write-Warning "$Name - script not found at $ScriptPath"
+        return
+    }
+    Write-Host ''
+    Write-Host "--- $Name ".PadRight(72, '-')
+    Set-StepState $StepKey 'running'
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        # *>&1 turns the collector's Write-Host stage lines into a stream this
+        # pipeline can see, so the progress page shows them AS THEY HAPPEN.
+        # Data objects (a report's return value) are dropped, not displayed.
+        & $ScriptPath @Arguments *>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.InformationRecord] -or
+                $_ -is [System.Management.Automation.WarningRecord] -or
+                $_ -is [string]) {
+                $line = "$_".TrimEnd()
+                if ($line) { Write-Host $line; Add-StatusLine $StepKey $line }
+            }
+        }
+        $sw.Stop()
+        Add-Result $Name 'ok' '' $sw.Elapsed.TotalSeconds
+        Set-StepState $StepKey 'ok' -Seconds $sw.Elapsed.TotalSeconds
+    } catch {
+        $sw.Stop()
+        Add-Result $Name 'FAILED' $_.Exception.Message $sw.Elapsed.TotalSeconds
+        Add-StatusLine $StepKey "ERROR: $($_.Exception.Message)"
+        Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name $_.Exception.Message)
+        Write-Warning "$Name failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-Native {
+    param([string]$Name, [string]$Exe, [string[]]$NativeArgs, [string]$WorkDir, [switch]$Skip, [string]$StepKey)
+    if ($Skip) { Add-Result $Name 'skipped'; Set-StepState $StepKey 'skipped'; return }
+    Write-Host ''
+    Write-Host "--- $Name ".PadRight(72, '-')
+    Set-StepState $StepKey 'running'
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $prev = Get-Location
+    try {
+        if ($WorkDir) { Set-Location -LiteralPath $WorkDir }
+        & $Exe @NativeArgs 2>&1 | ForEach-Object {
+            $line = "$_".TrimEnd()
+            if ($line) { Write-Host $line; Add-StatusLine $StepKey $line }
+        }
+        $code = $LASTEXITCODE
+        $sw.Stop()
+        if ($code -ne 0) {
+            Add-Result $Name 'FAILED' "exit code $code" $sw.Elapsed.TotalSeconds
+            Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name "exit code $code")
+            Write-Warning "$Name exited with code $code"
+        } else {
+            Add-Result $Name 'ok' '' $sw.Elapsed.TotalSeconds
+            Set-StepState $StepKey 'ok' -Seconds $sw.Elapsed.TotalSeconds
+        }
+    } catch {
+        $sw.Stop()
+        Add-Result $Name 'FAILED' $_.Exception.Message $sw.Elapsed.TotalSeconds
+        Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name $_.Exception.Message)
+        Write-Warning "$Name failed: $($_.Exception.Message)"
+    } finally {
+        Set-Location $prev
+    }
+}
+
+# --------------------------------------------------------------------------- #
+# Sign in once for all three Entra tools
+# --------------------------------------------------------------------------- #
+
+# Start the progress page first, so the person has something to watch while
+# the sign-in window is up - and so a failure anywhere still reports somewhere.
+if (-not $NoStatusPage) {
+    $tpl = Join-Path $PSScriptRoot 'refresh-status.html'
+    if (Test-Path $tpl) {
+        try {
+            $null = New-Item -ItemType Directory -Path $SitePath -Force
+            Copy-Item $tpl (Join-Path $SitePath 'status.html') -Force
+            $script:StatusJsPath = Join-Path $SitePath 'progress.js'
+            $script:StatusEnabled = $true
+            Update-RefreshStatus -Force
+        } catch { $script:StatusEnabled = $false }
+        # Opening the browser is best-effort and must never disable the page
+        # itself - a headless or non-Windows host still gets progress.js.
+        if ($script:StatusEnabled) {
+            try { Start-Process (Join-Path $SitePath 'status.html') | Out-Null }
+            catch { Write-Host "Progress page: $(Join-Path $SitePath 'status.html') (open it in a browser to watch)" }
+        }
+    }
+}
+
+$needGraph = -not ($SkipTenantDocs -and $SkipSecurity -and $SkipLicensing)
+
+if (-not ($needGraph -and -not $NoConnect)) {
+    Set-StepState 'signin' 'skipped' -Detail 'Already signed in, or nothing to collect'
+}
+if ($needGraph -and -not $NoConnect) {
+    Set-StepState 'signin' 'running'
+    $scopes = @(
+        'Directory.Read.All'
+        'Policy.Read.All'
+        'RoleManagement.Read.Directory'
+        'Application.Read.All'
+        'Organization.Read.All'
+        'User.Read.All'
+        'AuditLog.Read.All'
+        'DeviceManagementConfiguration.Read.All'
+        'DeviceManagementManagedDevices.Read.All'
+        'DeviceManagementApps.Read.All'
+    )
+    if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
+        throw "Microsoft.Graph.Authentication is not installed. Run: Install-Module Microsoft.Graph -Scope CurrentUser"
+    }
+    Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+    $ctx = Get-MgContext
+    if (-not $ctx) {
+        Write-Host 'Connecting to Microsoft Graph (read-only scopes)...'
+        Add-StatusLine 'signin' 'A Microsoft sign-in window is open - finish signing in there.'
+        Connect-MgGraph -Scopes $scopes -NoWelcome
+    } else {
+        Write-Host "Already connected as $($ctx.Account) - reusing that session."
+        $missing = @($scopes | Where-Object { $_ -notin $ctx.Scopes })
+        if ($missing.Count) {
+            Write-Warning ("Current session is missing: {0}" -f ($missing -join ', '))
+            Write-Warning 'Some sections may come back empty. Disconnect-MgGraph and re-run to get all scopes.'
+        }
+    }
+    Set-StepState 'signin' 'ok' -Detail 'Signed in with read-only access'
+}
+
+$null = New-Item -ItemType Directory -Path $OutputRoot -Force
+
+# --------------------------------------------------------------------------- #
+# Collectors
+# --------------------------------------------------------------------------- #
+
+Invoke-Step -Name 'entra-tenant-docs' -Skip:$SkipTenantDocs -StepKey 'tenant' `
+    -ScriptPath (Join-Path $ToolRoot 'entra-tenant-docs\Export-EntraTenantDocs.ps1') `
+    -Arguments @{ OutputPath = (Join-Path $OutputRoot 'tenant-docs') }
+Update-StatsFromOutputs
+
+Invoke-Step -Name 'entra-security-snapshot' -Skip:$SkipSecurity -StepKey 'security' `
+    -ScriptPath (Join-Path $ToolRoot 'entra-security-snapshot\Get-EntraSecuritySnapshot.ps1') `
+    -Arguments @{
+        JsonPath  = (Join-Path $OutputRoot 'security-snapshot.json')
+        StaleDays = $StaleDays
+    }
+Update-StatsFromOutputs
+
+Invoke-Step -Name 'm365-license-waste-report' -Skip:$SkipLicensing -StepKey 'licensing' `
+    -ScriptPath (Join-Path $ToolRoot 'm365-license-waste-report\Get-LicenseWasteReport.ps1') `
+    -Arguments @{
+        JsonPath  = (Join-Path $OutputRoot 'licensing.json')
+        StaleDays = $StaleDays
+    }
+Update-StatsFromOutputs
+
+# The printer collector usually runs on its own short timer; only poll here if
+# the caller actually pointed us at a config.
+$fleetRepo = Join-Path $ToolRoot 'print-fleet-dashboard'
+$doFleet = -not $SkipFleet -and $FleetConfig -and $FleetDb
+if ($doFleet) {
+    Invoke-Native -Name 'print-fleet-collector' -StepKey 'fleet' -Exe $Python -WorkDir $fleetRepo `
+        -NativeArgs @('collector.py', '--config', $FleetConfig, '--db', $FleetDb)
+} elseif ($SkipFleet) {
+    Add-Result 'print-fleet-collector' 'skipped'
+    Set-StepState 'fleet' 'skipped'
+} else {
+    Add-Result 'print-fleet-collector' 'skipped' 'no -FleetConfig/-FleetDb given'
+    Set-StepState 'fleet' 'skipped' -Detail 'No printers configured yet - optional'
+}
+
+# --------------------------------------------------------------------------- #
+# Build the console
+# --------------------------------------------------------------------------- #
+
+if (-not (Test-Path -LiteralPath $ConfigPath)) {
+    throw "Console config not found: $ConfigPath (copy sources.example.ini to sources.ini and edit the paths)"
+}
+
+Invoke-Native -Name 'console build' -StepKey 'build' -Exe $Python -WorkDir $PSScriptRoot `
+    -NativeArgs @('build.py', '--config', $ConfigPath, '--out', $SitePath)
+
+# --------------------------------------------------------------------------- #
+# Summary
+# --------------------------------------------------------------------------- #
 
 # Laid out by hand rather than with Format-Table: a non-interactive host (a
 # scheduled task, a CI runner) reports no console width and Format-Table then
@@ -291,6 +450,24 @@ if ($plain.Count) {
     foreach ($line in $plain) { Write-Host $line }
     Write-Host ''
 }
+
+$summaryLines = @()
+if ($failed.Count -or $missing.Count) {
+    $summaryLines += "$(($failed.Count + $missing.Count)) step(s) had problems:"
+    foreach ($line in $plain) { $summaryLines += $line.Trim() }
+    if ($consoleFailed) { $summaryLines += 'Because the build step failed, the console still shows its previous data.' }
+    else { $summaryLines += 'Everything else ran, and the console shows how old each of its numbers is.' }
+} else {
+    $summaryLines += 'Everything ran and your console was rebuilt with fresh data.'
+    $people = @($script:StatusStats | Where-Object { $_.k -eq 'people' })
+    $seats  = @($script:StatusStats | Where-Object { $_.k -eq 'unused paid seats' })
+    if ($people.Count -and $seats.Count) {
+        $summaryLines += "It covers $($people[0].v) people, and flagged $($seats[0].v) unused paid seats worth a look."
+    } elseif ($people.Count) {
+        $summaryLines += "It covers $($people[0].v) people."
+    }
+}
+Update-RefreshStatus -Done -Ok:(-not ($failed.Count -or $missing.Count)) -Summary $summaryLines -Force
 
 if ($failed.Count -or $missing.Count) {
     if ($consoleFailed) {
