@@ -95,7 +95,18 @@ foreach ($d in @($Root, $tools, $output, $site)) { $null = New-Item -ItemType Di
 
 # --------------------------------------------------------------------------- #
 Write-Host ''
-Write-Host '--- 1/5 Downloading the tools ---'
+# A release bundle ships the tools right next to this script; installing from
+# it needs no internet at all. A bare setup.ps1 downloads instead.
+$bundleTools = Join-Path $PSScriptRoot 'tools'
+$haveBundle = Test-Path $bundleTools
+$bundleIsInstall = $haveBundle -and ((Resolve-Path $bundleTools).Path -eq (Resolve-Path $tools).Path)
+if ($haveBundle -and -not $bundleIsInstall) {
+    $v = Join-Path $PSScriptRoot 'VERSION'
+    $vTxt = if (Test-Path $v) { " v$((Get-Content $v -TotalCount 1).Trim())" } else { '' }
+    Write-Host "--- 1/5 Installing the tools from the bundle$vTxt (no download needed) ---"
+} else {
+    Write-Host '--- 1/5 Downloading the tools ---'
+}
 foreach ($r in $REPOS) {
     $dest = Join-Path $tools $r
     $isConsole = ($r -eq 'it-ops-console')
@@ -115,6 +126,13 @@ foreach ($r in $REPOS) {
         Write-Host "  refreshing: it-ops-console (updates every time setup runs)"
     } else {
         Write-Host "  fetching: $r"
+    }
+    $bundled = Join-Path $bundleTools $r
+    if ($haveBundle -and -not $bundleIsInstall -and (Test-Path $bundled)) {
+        if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+        Copy-Item $bundled $dest -Recurse
+        Write-Host "  installed from bundle: $r"
+        continue
     }
     $zip = Join-Path $tools "$r.zip"
     try {

@@ -73,11 +73,18 @@ running.
 
 ## The easy way — download one file, double-click it
 
-Download [`Setup-IT-Ops-Console.cmd`](Setup-IT-Ops-Console.cmd) and
-double-click it. That is the whole instruction: it fetches `setup.ps1` next to
-itself and runs it with the right settings — no PowerShell knowledge, no
-right-click menus, no execution policy. (Windows may show "Windows protected
-your PC" for a downloaded file — click **More info → Run anyway**.)
+Grab **`IT-Ops-Suite-v<version>.zip`** from the
+[latest release](https://github.com/JonathanT10/it-ops-console/releases/latest),
+extract it anywhere, and double-click `Setup-IT-Ops-Console.cmd`. That is the
+whole instruction: the bundle carries all five tools, installs without
+touching the internet, and stamps its version into the console's footer so
+"which build are you on?" always has an answer. (Windows may show "Windows
+protected your PC" for a downloaded file — click **More info → Run anyway**.)
+
+No release handy? [`Setup-IT-Ops-Console.cmd`](Setup-IT-Ops-Console.cmd) alone
+works too — it downloads what the bundle would have carried. Releases are
+assembled by [`make-release.ps1`](make-release.ps1) from the repos' current
+main branches.
 
 Prefer to see what you are running first? Download [`setup.ps1`](setup.ps1)
 itself and right-click → **Run with PowerShell**. Same result. It creates

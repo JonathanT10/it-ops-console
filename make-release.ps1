@@ -1,0 +1,87 @@
+<#
+.SYNOPSIS
+    Assemble the one-file suite bundle: IT-Ops-Suite-v<version>.zip
+
+.DESCRIPTION
+    Pulls the five published repos fresh from GitHub, stages them into the
+    bundle layout, stamps the version, and zips it:
+
+      IT-Ops-Suite/
+        Setup-IT-Ops-Console.cmd    double-click this - that's the instruction
+        setup.ps1                   installs from the bundled tools, no internet needed
+        VERSION
+        README.txt
+        tools/<the five repos>
+
+    Publish the zip as a GitHub Release on it-ops-console. Downloading THAT
+    is the whole ship story: one file, one double-click, works offline.
+
+.EXAMPLE
+    .\make-release.ps1 -Version 1.0.0
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string]$Version,
+    [string]$OutDir = '.'
+)
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
+
+$REPOS = @('entra-tenant-docs', 'entra-security-snapshot', 'm365-license-waste-report',
+           'print-fleet-dashboard', 'it-ops-console')
+
+$stage = Join-Path ([System.IO.Path]::GetTempPath()) "itops-release-$([guid]::NewGuid().ToString('n').Substring(0,8))"
+$root = Join-Path $stage 'IT-Ops-Suite'
+$toolsDir = Join-Path $root 'tools'
+$null = New-Item -ItemType Directory -Path $toolsDir -Force
+
+foreach ($r in $REPOS) {
+    Write-Host "fetching $r..."
+    $zip = Join-Path $stage "$r.zip"
+    Invoke-WebRequest "https://github.com/JonathanT10/$r/archive/refs/heads/main.zip" -OutFile $zip -UseBasicParsing
+    Expand-Archive $zip -DestinationPath $stage -Force
+    Move-Item (Join-Path $stage "$r-main") (Join-Path $toolsDir $r)
+    Remove-Item $zip
+}
+
+# The launcher pair at the bundle root comes from the console repo just fetched.
+$console = Join-Path $toolsDir 'it-ops-console'
+Copy-Item (Join-Path $console 'Setup-IT-Ops-Console.cmd') $root
+Copy-Item (Join-Path $console 'setup.ps1') $root
+
+# Version stamp: at the root for setup, and inside the console for the footer.
+$stamp = "$Version`r`nassembled $(Get-Date -Format yyyy-MM-dd) from the repos' main branches"
+Set-Content -Path (Join-Path $root 'VERSION') -Value $stamp -Encoding ASCII
+Set-Content -Path (Join-Path $console 'VERSION') -Value $stamp -Encoding ASCII
+
+Set-Content -Path (Join-Path $root 'README.txt') -Encoding ASCII -Value @"
+IT Ops Suite v$Version
+======================
+
+Double-click Setup-IT-Ops-Console.cmd. That is the whole instruction.
+
+It installs to C:\IT-Ops (you can change that at the one question it asks),
+puts two shortcuts on your desktop, and offers to run the first collection:
+
+  Refresh IT Ops Data   collects from Microsoft 365 (you sign in, read-only)
+                        and rebuilds your console, with live progress
+  IT Ops Console        opens the result in your browser
+
+Everything against your tenant is read-only. Nothing stores a password.
+Printers are optional: put their IPs in
+C:\IT-Ops\tools\print-fleet-dashboard\config.ini and the next Refresh
+picks them up automatically.
+
+If something goes wrong: run check-setup.ps1 in C:\IT-Ops\tools\it-ops-console
+(right-click > Run with PowerShell) and send check-setup.log to whoever helps you.
+
+Source, docs and updates: https://github.com/JonathanT10/it-ops-console
+"@
+
+$zipName = Join-Path (Resolve-Path $OutDir) "IT-Ops-Suite-v$Version.zip"
+if (Test-Path $zipName) { Remove-Item $zipName }
+Compress-Archive -Path $root -DestinationPath $zipName
+Remove-Item $stage -Recurse -Force
+Write-Host ''
+Write-Host "Bundle: $zipName"
+Write-Host 'Publish it as a GitHub Release on it-ops-console.'

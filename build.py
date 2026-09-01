@@ -22,6 +22,7 @@ import sys
 from datetime import datetime, timezone
 
 from console import model, pages
+from console import render
 from console.render import write_page
 from console.sources import load_all
 
@@ -41,6 +42,13 @@ def main():
 
     here = os.path.dirname(os.path.abspath(__file__))
     config = os.path.join(here, "sample", "sources.ini") if args.sample else args.config
+
+    # Release bundles ship a VERSION file beside this script; the footer then
+    # says which suite build produced the page. A git checkout has none.
+    vpath = os.path.join(here, "VERSION")
+    if os.path.exists(vpath):
+        with open(vpath, "r", encoding="utf-8-sig") as fh:
+            render.SUITE_VERSION = fh.readline().strip()
 
     cfg, feeds = load_all(config)
 
