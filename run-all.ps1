@@ -39,12 +39,13 @@
     Python 3 executable. 'python' on most Windows installs, 'python3' elsewhere.
 
 .PARAMETER FleetConfig
-    print-fleet-dashboard config.ini. Only needed if you want this wrapper to
-    poll the printers too; most sites let the collector run on its own timer
-    and leave this unset.
+    print-fleet-dashboard config.ini. Usually unnecessary: when the config.ini
+    beside the collector differs from the shipped example, the wrapper polls
+    the printers automatically - editing that file IS turning the feature on.
 
 .PARAMETER FleetDb
-    The fleet database the collector appends to. Must match sources.ini.
+    The fleet database the collector appends to. Defaults to fleet.db in
+    -OutputRoot, which is where setup's sources.ini already points.
 
 .PARAMETER NoStatusPage
     Do not open the live progress page. Use for scheduled/headless runs; the
@@ -393,10 +394,26 @@ Invoke-Step -Name 'm365-license-waste-report' -Skip:$SkipLicensing -StepKey 'lic
     }
 Update-StatsFromOutputs
 
-# The printer collector usually runs on its own short timer; only poll here if
-# the caller actually pointed us at a config.
+# Printers auto-engage: a config.ini that differs from the shipped example is
+# a person saying "these are my printers", and the Refresh must just pick that
+# up - nobody should need command-line parameters to turn a feature on.
+# Explicit -FleetConfig/-FleetDb still override; -SkipFleet still wins.
 $fleetRepo = Join-Path $ToolRoot 'print-fleet-dashboard'
-$doFleet = -not $SkipFleet -and $FleetConfig -and $FleetDb
+if (-not $FleetConfig) {
+    $autoCfg = Join-Path $fleetRepo 'config.ini'
+    $exCfg   = Join-Path $fleetRepo 'config.example.ini'
+    if (Test-Path $autoCfg) {
+        $edited = $true
+        if (Test-Path $exCfg) {
+            $a = (Get-Content $autoCfg -Raw) -replace '\s', ''
+            $b = (Get-Content $exCfg -Raw) -replace '\s', ''
+            $edited = ($a -ne $b)
+        }
+        if ($edited) { $FleetConfig = $autoCfg }
+    }
+}
+if (-not $FleetDb) { $FleetDb = Join-Path $OutputRoot 'fleet.db' }
+$doFleet = -not $SkipFleet -and $FleetConfig
 if ($doFleet) {
     Invoke-Native -Name 'print-fleet-collector' -StepKey 'fleet' -Exe $Python -WorkDir $fleetRepo `
         -NativeArgs @('collector.py', '--config', $FleetConfig, '--db', $FleetDb)
@@ -404,8 +421,8 @@ if ($doFleet) {
     Add-Result 'print-fleet-collector' 'skipped'
     Set-StepState 'fleet' 'skipped'
 } else {
-    Add-Result 'print-fleet-collector' 'skipped' 'no -FleetConfig/-FleetDb given'
-    Set-StepState 'fleet' 'skipped' -Detail 'No printers configured yet - optional'
+    Add-Result 'print-fleet-collector' 'skipped' 'config.ini is still the unedited example'
+    Set-StepState 'fleet' 'skipped' -Detail 'Optional - add printer IPs to config.ini and Refresh again'
 }
 
 # --------------------------------------------------------------------------- #
