@@ -90,6 +90,8 @@ def main():
             print("  %s %-12s %s" % (mark.get(feed.state, "      "), key, feed.age))
         elif feed.error:
             print("  fail   %-12s %s" % (key, feed.error))
+        elif feed.missing:
+            print("  ----   %-12s nothing collected yet (%s)" % (key, feed.path))
         else:
             print("  ----   %-12s not configured" % key)
 

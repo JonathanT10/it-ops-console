@@ -98,16 +98,39 @@ Write-Host ''
 Write-Host '--- 1/5 Downloading the tools ---'
 foreach ($r in $REPOS) {
     $dest = Join-Path $tools $r
-    if (Test-Path $dest) {
+    $isConsole = ($r -eq 'it-ops-console')
+    if ((Test-Path $dest) -and -not $isConsole) {
         Write-Host "  already present: $r  (delete the folder and re-run setup to refresh it)"
         continue
     }
-    Write-Host "  fetching: $r"
+    if ((Test-Path $dest) -and $isConsole) {
+        # The console is the renderer and carries no data of yours (this setup
+        # rewrites its sources.ini below), so it refreshes on every run -
+        # "run setup again" is also how you update. Download first, swap only
+        # on success: a network hiccup must never leave a broken install.
+        if ($PSScriptRoot -and (Resolve-Path $PSScriptRoot).Path -eq (Resolve-Path $dest).Path) {
+            Write-Host "  already present: it-ops-console (setup is running from inside it)"
+            continue
+        }
+        Write-Host "  refreshing: it-ops-console (updates every time setup runs)"
+    } else {
+        Write-Host "  fetching: $r"
+    }
     $zip = Join-Path $tools "$r.zip"
-    Invoke-WebRequest "https://github.com/JonathanT10/$r/archive/refs/heads/main.zip" -OutFile $zip -UseBasicParsing
-    Expand-Archive $zip -DestinationPath $tools -Force
-    Rename-Item (Join-Path $tools "$r-main") $dest
-    Remove-Item $zip
+    try {
+        Invoke-WebRequest "https://github.com/JonathanT10/$r/archive/refs/heads/main.zip" -OutFile $zip -UseBasicParsing
+        Expand-Archive $zip -DestinationPath $tools -Force
+        if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+        Rename-Item (Join-Path $tools "$r-main") $dest
+        Remove-Item $zip
+    } catch {
+        foreach ($leftover in @((Join-Path $tools "$r-main"), $zip)) {
+            if (Test-Path $leftover) { Remove-Item $leftover -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        if (Test-Path $dest) {
+            Write-Warning "  could not refresh $r - keeping the copy you have. ($($_.Exception.Message))"
+        } else { throw }
+    }
 }
 
 # --------------------------------------------------------------------------- #
