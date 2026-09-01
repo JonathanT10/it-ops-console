@@ -436,7 +436,8 @@ def build_fleet(m, feed, available, generated):
         return shell("Print fleet", "fleet", available,
                      _feed_empty("Print fleet", feed,
                                  "Printers are optional. To turn this on, put their IPs in "
-                                 "print-fleet-dashboard's config.ini and run its collector once."), generated)
+                                 "print-fleet-dashboard's config.ini - the next Refresh picks "
+                                 "them up automatically."), generated)
     cards = _cards([
         {"k": "Devices online", "v": "%d/%d" % (m["online"], m["total"])},
         {"k": "Need attention", "v": len(m["attention"])},
