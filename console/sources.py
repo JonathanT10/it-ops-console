@@ -224,6 +224,24 @@ LOADERS = {
 }
 
 
+def _norm(p):
+    # Configs written on Windows use backslashes. On POSIX a backslash is an
+    # ordinary filename character, so a copied config fails with paths that
+    # LOOK right in the error message - normalize instead.
+    return p.replace("\\", os.sep) if os.sep == "/" else p
+
+
+def base_dir(cfg, config_path):
+    """[console] base_path, resolved against the config file's own folder - the
+    common parent of every relative feed path, and where run-all's own files
+    (alerts.json, alerts-state.json) live."""
+    cfg_dir = os.path.dirname(os.path.abspath(config_path))
+    base = _norm(cfg.get("console", "base_path", fallback="").strip())
+    if base and not os.path.isabs(base):
+        base = os.path.join(cfg_dir, base)
+    return base or cfg_dir
+
+
 def load_all(config_path):
     """Read sources.ini and load every configured feed. Never raises for a
     feed problem - a broken or missing feed becomes a Feed carrying its error,
@@ -240,16 +258,7 @@ def load_all(config_path):
     # current directory, so the console builds the same from anywhere - which
     # matters when a scheduled task runs it from C:\Windows\System32.
     cfg_dir = os.path.dirname(os.path.abspath(config_path))
-
-    def _norm(p):
-        # Configs written on Windows use backslashes. On POSIX a backslash is
-        # an ordinary filename character, so a copied config fails with paths
-        # that LOOK right in the error message - normalize instead.
-        return p.replace("\\", os.sep) if os.sep == "/" else p
-
-    base = _norm(cfg.get("console", "base_path", fallback="").strip())
-    if base and not os.path.isabs(base):
-        base = os.path.join(cfg_dir, base)
+    base = base_dir(cfg, config_path)
 
     feeds = {}
     for key, (label, loader) in LOADERS.items():

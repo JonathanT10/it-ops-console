@@ -128,6 +128,13 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .banner.critical > svg { color: var(--critical); }
 .banner .why { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
 footer .refresh-note { display: block; margin-top: 4px; }
+.rules { width: 100%; border-collapse: collapse; }
+.rules td.set { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.rules td.set.off { color: var(--muted); }
+.rules tr.silenced td { color: var(--muted); }
+.rules .help { display: block; font-size: 12px; color: var(--muted); }
+.kv { display: grid; grid-template-columns: 150px 1fr; gap: 6px 14px; font-size: 13.5px; }
+.kv .k { color: var(--ink-2); }
 .tile { display: block; background: var(--surface); border: 1px solid var(--border);
   border-radius: 12px; padding: 15px 16px; text-decoration: none; color: inherit; }
 .tile:hover { border-color: var(--accent); }
@@ -195,6 +202,7 @@ PAGES = [
     ("licensing", "Licensing"),
     ("fleet",     "Print fleet"),
     ("changes",   "What changed"),
+    ("alerts",    "Alerts"),
 ]
 
 

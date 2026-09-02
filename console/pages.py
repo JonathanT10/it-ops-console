@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from . import alerts as alert_rules
+from .actions import CA_GAP_ACTION, next_step  # noqa: F401 - re-exported for callers and tests
 from .render import (ICONS, bar_rows, badge, delta_badge, esc, fmt_metric, freshness_chip,
                      meter, money, muted_badge, shell, sparkline, status_badge, trend_card)
 
@@ -53,63 +55,6 @@ def _table(headers, rows, empty="Nothing to show."):
 # wherever it appears. Conditional Access gaps are keyed by the gap analysis's
 # own check ids (entra-tenant-docs, Get-CaGapAnalysis).
 # --------------------------------------------------------------------------- #
-
-CA_GAP_ACTION = {
-    "mfa-all-users":
-        "Create a Conditional Access policy that requires MFA for all users on all cloud apps.",
-    "block-legacy-auth":
-        "Add a Conditional Access policy that blocks legacy clients "
-        "(Exchange ActiveSync and 'Other clients').",
-    "admin-mfa":
-        "Require MFA for admin roles - a Conditional Access policy targeting directory roles, "
-        "or confirm the all-users MFA policy covers them.",
-    "baseline-exists":
-        "Turn on at least one enforced Conditional Access policy, or enable Security Defaults.",
-    "breakglass-exclusion":
-        "Exclude your break-glass (emergency) accounts from every all-users block or MFA policy "
-        "so you cannot lock yourself out.",
-    "guest-protection":
-        "Cover guests with MFA or a block: a Conditional Access policy targeting "
-        "'Guests or external users'.",
-    "risk-policies":
-        "Optional, needs Entra ID P2: add sign-in-risk and user-risk Conditional Access policies.",
-    "device-grants":
-        "Optional: require a compliant or hybrid-joined device in a Conditional Access grant.",
-    "report-only-lingering":
-        "Decide on each report-only policy: switch it to On, or delete it.",
-    "unused-locations":
-        "Delete named locations no policy uses, or reference them in a policy.",
-}
-
-
-def next_step(kind, key=None):
-    """One line: what a person does next about this kind of finding."""
-    if kind == "ca-gap":
-        return CA_GAP_ACTION.get(str(key or ""),
-                                 "Review this Conditional Access gap in the Entra admin center.")
-    if kind == "admin-no-mfa":
-        return ("Have them register MFA (aka.ms/mfasetup) today, and enforce it for admin roles "
-                "with Conditional Access so it cannot lapse.")
-    if kind == "disabled-licensed":
-        return ("Remove the license from the disabled account (M365 admin center > Users > "
-                "Active users) so the seat can be reclaimed.")
-    if kind == "stale-account":
-        return ("Check with the person's manager; if they have left, disable the account and "
-                "reclaim its licenses.")
-    if kind == "legacy-auth":
-        return ("Block it: a Conditional Access policy targeting legacy clients "
-                "(Exchange ActiveSync and 'Other clients') closes this path.")
-    if kind == "fleet":
-        st = str(key or "")
-        if st == "offline":
-            return ("Check the printer is powered on and on the network; it is marked offline "
-                    "when it stops answering SNMP.")
-        if st == "warning":
-            return "Restock what the detail names (toner or paper) before it runs out."
-        return ("Walk to the printer - its panel will show what the detail here describes "
-                "(jam, door open, out of toner).")
-    return ""
-
 
 def _act(text):
     """The arrow line under a finding. Empty when there is nothing to say."""
@@ -738,3 +683,151 @@ def build_changes(m, feed, available, generated):
             'something actually changed appear here.</p>%s</section>' % "".join(blocks))
     return shell("What changed", "changes", available, body, generated,
                  subtitle="Computed by diffing archived snapshots &mdash; the tenant's own history")
+
+
+# --------------------------------------------------------------------------- #
+# Alerts
+# --------------------------------------------------------------------------- #
+
+SEV_BADGE = {
+    "critical": lambda: badge("critical", "warn", "critical"),
+    "warning":  lambda: badge("warning", "warn", "warning"),
+    "info":     lambda: muted_badge("info", "dash"),
+}
+
+
+def alerts_page_model(fired, cfg, state, channels):
+    """Everything the Alerts page needs: where alerts go, what is firing, every
+    rule with its current setting, how alerts.ini was read, what was last sent."""
+    when = cfg["send"]["when"]
+    day = cfg["send"]["digest_day"]
+    em = cfg["email"]
+    rules = []
+    for tab, label in alert_rules.TABS:
+        rows = []
+        for r in alert_rules.CATALOG:
+            if r.tab != tab:
+                continue
+            val = cfg["rules"].get(r.key, r.default)
+            rows.append({"id": r.id, "label": r.label, "help": r.help, "severity": r.severity,
+                         "setting": alert_rules.rule_setting_text(r, val),
+                         "on": bool(val) if r.kind == "switch" else (float(val or 0) > 0)})
+        rules.append({"tab": tab, "label": label, "notify": cfg["tabs"].get(tab, {}).get("notify", True), "rows": rows})
+    hist = list((state or {}).get("history") or [])
+    return {
+        "teams": channels["teams"],
+        "email": channels["email"],
+        "email_to": list(em["to"]),
+        "email_relay": em["smtp_server"],
+        "any_channel": channels["any"],
+        "when_text": ("only when an alert appears, gets worse, or clears" if when == "changes"
+                      else "a summary after every refresh"),
+        "digest_text": ("every %s" % day.capitalize()) if day else "never",
+        "console_link": cfg["send"]["console_link"],
+        "config_path": cfg.get("path") or "alerts.ini",
+        "config_exists": bool(cfg.get("exists")),
+        "problems": list(cfg.get("problems") or []),
+        "fired": fired,
+        "by_tab": _group_alerts(fired),
+        "rules": rules,
+        "last_sent": (state or {}).get("last_sent"),
+        "history": hist[:6],
+    }
+
+
+def _group_alerts(fired):
+    out = []
+    for tab, label in alert_rules.TABS:
+        items = [a for a in fired if a.get("tab") == tab]
+        if items:
+            out.append((label, items))
+    return out
+
+
+def build_alerts(am, available, generated):
+    if not am:
+        return shell("Alerts", "alerts", available, _empty("Alerts are not available in this build."), generated)
+
+    # -- where alerts go -------------------------------------------------- #
+    kv = []
+    kv.append(("Teams", "connected - a Workflows URL is set" if am["teams"] else "not set up"))
+    if am["email"]:
+        kv.append(("Email", "to %s via %s" % (esc(", ".join(am["email_to"])), esc(am["email_relay"]))))
+    else:
+        kv.append(("Email", "not set up"))
+    kv.append(("When", am["when_text"]))
+    kv.append(("Weekly summary", am["digest_text"]))
+    if am["console_link"]:
+        kv.append(("Console link", esc(am["console_link"])))
+    kv.append(("Last message", esc(am["last_sent"][:16].replace("T", " ") + " UTC") if am["last_sent"] else "none yet"))
+    where = '<div class="kv">%s</div>' % "".join(
+        '<span class="k">%s</span><span>%s</span>' % (esc(k), v if k in ("Email", "Console link", "Last message") else esc(v))
+        for k, v in kv)
+    setup_note = ""
+    if not am["any_channel"]:
+        setup_note = ('<div class="banner warning" role="status">%s<div>Alerts are worked out on every refresh '
+                      'but not sent anywhere yet. To receive them, open <code>%s</code> and paste your Teams '
+                      'channel\'s Workflows URL under <code>[teams]</code>, or fill in <code>[email]</code>; then '
+                      'run <code>python notify.py --test</code> from the console folder to see one arrive.</div></div>'
+                      % (ICONS["warn"], esc(am["config_path"])))
+    where_html = ('<section><h2>Where alerts go</h2><p class="note">Set in alerts.ini. The refresh sends a '
+                  'message %s.</p>%s%s</section>' % (esc(am["when_text"]), setup_note, where))
+
+    # -- firing now ------------------------------------------------------- #
+    n = len(am["fired"])
+    if n:
+        rows = []
+        for label, items in am["by_tab"]:
+            for a in items:
+                rows.append('<div class="chg"><span class="kind">%s</span><span>%s %s%s%s</span></div>'
+                            % (esc(label), SEV_BADGE.get(a.get("severity"), SEV_BADGE["info"])(), esc(a.get("title")),
+                               (' <span class="cat">&mdash; %s</span>' % esc(a["detail"])) if a.get("detail") else "",
+                               _act(a.get("action"))))
+        firing = ('<section><h2>Firing now</h2><p class="note">%d alert%s from the rules that are on. '
+                  'Whether a message goes out depends on what changed since the last one.</p>%s</section>'
+                  % (n, "" if n == 1 else "s", "".join(rows)))
+    else:
+        firing = ('<section><h2>Firing now</h2><p class="note">Nothing - every rule that is on is quiet.'
+                  '</p></section>')
+
+    # -- what is watched -------------------------------------------------- #
+    tables = []
+    for t in am["rules"]:
+        trs = []
+        for r in t["rows"]:
+            cls = "" if r["on"] and t["notify"] else "silenced"
+            trs.append('<tr class="%s"><td>%s<span class="help">%s</span></td><td class="set %s">%s</td><td>%s</td></tr>'
+                       % (cls, esc(r["label"]), esc(r["help"]), "" if r["on"] else "off",
+                          esc(r["setting"]), SEV_BADGE.get(r["severity"], SEV_BADGE["info"])()))
+        silenced = "" if t["notify"] else ' <span class="muted">(notify = no: this tab is silenced)</span>'
+        tables.append('<h3>%s%s</h3><div class="scroll"><table class="rules"><thead><tr><th>Rule</th>'
+                      '<th>Setting</th><th>Severity</th></tr></thead><tbody>%s</tbody></table></div>'
+                      % (esc(t["label"]), silenced, "".join(trs)))
+    watched = ('<section><h2>What is watched</h2><p class="note">One line per rule in alerts.ini: yes/no, '
+               'or a number where 0 means off. Change a line and the next refresh uses it.</p>%s</section>'
+               % "".join(tables))
+
+    # -- how the file was read ------------------------------------------- #
+    if not am["config_exists"]:
+        read = ('<section><h2>alerts.ini</h2><p class="note">No alerts.ini yet at %s - every rule is at its '
+                'default. Copy alerts.example.ini to alerts.ini to change any of them.</p></section>' % esc(am["config_path"]))
+    elif am["problems"]:
+        read = ('<section><h2>alerts.ini</h2><p class="note">%d line%s could not be used as written; the rest '
+                'were. Each is using its default instead:</p>%s</section>'
+                % (len(am["problems"]), "" if len(am["problems"]) == 1 else "s",
+                   "".join('<div class="chg"><span class="kind">line</span><span>%s</span></div>' % esc(p) for p in am["problems"])))
+    else:
+        read = ('<section><h2>alerts.ini</h2><p class="note">Every line in %s was understood.</p></section>'
+                % esc(am["config_path"]))
+
+    # -- recent messages -------------------------------------------------- #
+    hist_html = ""
+    if am["history"]:
+        hist_html = ('<section><h2>Recent messages</h2>%s</section>' % "".join(
+            '<div class="chg"><span class="kind">%s</span><span>%s <span class="cat">&mdash; %s</span></span></div>'
+            % (esc(str(h.get("when", ""))[:10]), esc(h.get("title", "")),
+               esc(", ".join(h.get("channels") or []) or "sent")) for h in am["history"]))
+
+    body = where_html + firing + watched + read + hist_html
+    return shell("Alerts", "alerts", available, body, generated,
+                 subtitle="What this console tells you about, where, and what is firing right now.")
