@@ -67,10 +67,9 @@ Access, role assignments, licence purchases, app registrations, and Intune
 policies.
 
 **Alerts** — where alerts go (Teams, email, or nowhere yet), what is firing
-right now with the same next-step line as the other pages, every rule with its
-current setting including the ones turned off, how `alerts.ini` was read
-(a line it could not use is listed, not silently ignored), and the last
-messages sent. See *Alerts* below.
+right now with the same next-step line as the other pages, **every rule as a
+control you can change**, how `alerts.ini` was read (a line it could not use is
+listed, not silently ignored), and the last messages sent. See *Alerts* below.
 
 ## Posture over time
 
@@ -135,7 +134,7 @@ Prefer to see what you are running first? Download [`setup.ps1`](setup.ps1)
 itself and right-click → **Run with PowerShell**. Same result. It creates
 `C:\IT-Ops`, downloads all five tools, installs the Graph modules, checks for
 Python and offers to install it, writes a `sources.ini` where everything
-already points at everything else, and puts two shortcuts on your desktop:
+already points at everything else, and puts three shortcuts on your desktop:
 
 - **Refresh IT Ops Data** — runs every collector (you sign in when asked),
   then rebuilds the console. Double-click it on whatever rhythm suits you.
@@ -145,6 +144,8 @@ already points at everything else, and puts two shortcuts on your desktop:
   finish with one button to open the console. (`-NoStatusPage` for
   scheduled runs.)
 - **IT Ops Console** — opens the result in your browser.
+- **Apply Alert Settings** — applies whatever you changed on the console's
+  Alerts tab (see *Alerts* below). Only needed when you change something there.
 
 ![Refresh progress](docs/refresh-status.png)
 
@@ -234,7 +235,7 @@ legacy_auth_signins = yes
 ```
 
 The full list with a sentence on each rule is [`alerts.example.ini`](alerts.example.ini);
-the console's **Alerts** page shows the same list with the settings in force, what
+the console's **Alerts** page shows the same list as controls you can change, what
 is firing, and any line it could not read. Identity: critical and warning CA
 gaps, expired and expiring app credentials. Security: admins without MFA, MFA
 coverage, stale accounts, legacy authentication. Licensing: disabled accounts
@@ -242,6 +243,32 @@ still licensed, unassigned seats, unused-seat cost. Print fleet: offline, error,
 low supplies. What changed: Conditional Access, role grants, app registrations,
 licence counts, Intune (each change reported once). Refresh: could not sign in,
 a collector failed, certificate expiring, data older than N days.
+
+**Changing the rules from the console.** The Alerts tab is the settings page:
+tick, untick, or type a new number, and the box at the bottom shows the exact
+settings your changes produce. **Save settings** copies that to the clipboard
+and drops a copy in your Downloads folder; then double-click **Apply Alert
+Settings** on your desktop and it lands.
+
+Two steps rather than one, and deliberately so. The console is a folder of
+static HTML files — that is what lets you open it with no server running, and
+copy `console-site` onto a share for other people to read — and a page opened
+from a file cannot write into `C:\IT-Ops` by itself. The consequence worth
+knowing: **the page never contains, and never changes, where your alerts go.**
+The settings it produces cover the rules and the schedule only, so no Workflows
+URL is ever baked into a page, put on your clipboard, or left in Downloads.
+`[teams]` and `[email]` stay in `alerts.ini`, under the folder lock, edited by
+hand the once.
+
+`Apply Alert Settings` **merges** rather than overwrites: your comments, your
+channel settings, and any line a newer version of the console wrote are all left
+alone, and only the settings you changed move. It keeps the previous file as
+`alerts.ini.bak`, writes nothing at all if the result would not read back
+cleanly, and says what changed in plain words — "MFA coverage falls below: 90%
+to 95%. Print fleet: all alerts silenced." If your clipboard holds something
+else by the time you get there, it falls back to the copy in Downloads; if that
+is missing too, it tells you the four steps rather than failing. `python
+apply-alerts.py --dry-run` shows what it would do without doing it.
 
 **How it is built.** `console/alerts.py` is a catalog: one entry per rule (tab,
 label, on/off or threshold, default, severity, evaluate) that yields alerts with
@@ -403,6 +430,7 @@ last week's build against today's shows you real drift and not churn.
 ```
 python tests/test_console.py
 python tests/test_notify.py
+python tests/test_apply_alerts.py
 pwsh tests/test_run_all_signin.ps1
 pwsh tests/test_schedule_refresh.ps1
 ```
@@ -418,7 +446,14 @@ the Alerts page, and a full sample build. `test_notify.py` (34 checks) runs
 `notify.py` against a local fake webhook and a local fake mail relay: first run
 tells everything, a repeat stays quiet, new and worse speak, cleared is said
 once, events are never "cleared", the weekly digest fires on its day, a failed
-post leaves alerts untold so they are retried, `--test` and `--dry-run`. The two
+post leaves alerts untold so they are retried, `--test` and `--dry-run`.
+`test_apply_alerts.py` (37 checks) covers editing from the console: the merge
+keeps comments, the `[teams]` webhook and lines from newer versions, refuses a
+file it cannot parse, and never writes on a bad paste — and then opens the real
+page in a browser and applies what it produces, including the check that
+matters most, that an **untouched** page round-trips to exactly the settings
+already in force (which is what stops the page and the rules drifting apart).
+That last part needs Playwright; without it those checks say so and skip. The two
 PowerShell suites drive `run-all.ps1` and `schedule-refresh.ps1` against stub
 collectors, a stub Graph module, and stub Task Scheduler and certificate
 cmdlets: every rung of the sign-in ladder made to succeed, fail, or hang; the

@@ -29,6 +29,9 @@ if (Test-Path $console) {
 } else { Gap "desktop shortcut 'IT Ops Console' is missing - re-run setup to recreate it" }
 if (Test-Path $refresh) { Say "desktop shortcut 'Refresh IT Ops Data' present" }
 else { Gap "desktop shortcut 'Refresh IT Ops Data' is missing - re-run setup to recreate it" }
+$applyLnk = Join-Path $desktop 'Apply Alert Settings.lnk'
+if (Test-Path $applyLnk) { Say "desktop shortcut 'Apply Alert Settings' present" }
+else { Note "desktop shortcut 'Apply Alert Settings' is missing - re-run setup to add it (you can still edit alerts.ini by hand)" }
 if (-not $root) { $root = 'C:\IT-Ops'; Note "assuming the install folder is $root" }
 
 # ---- layout ---- #

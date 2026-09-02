@@ -13,10 +13,12 @@
          install it if it is missing
       5. Write the console's sources.ini so everything already points at
          everything else
-      6. Put two shortcuts on your desktop:
-           "IT Ops Console"       opens the console in your browser
-           "Refresh IT Ops Data"  runs every collector (you sign in), then
-                                  rebuilds the console
+      6. Put three shortcuts on your desktop:
+           "IT Ops Console"        opens the console in your browser
+           "Refresh IT Ops Data"   runs every collector (you sign in), then
+                                   rebuilds the console
+           "Apply Alert Settings"  applies alert settings you changed on the
+                                   console's Alerts tab
       7. Ask how the console should stay fresh: you click Refresh yourself,
          it refreshes daily while you are signed in, or it refreshes daily
          unattended (a Global Administrator registers a read-only app once)
@@ -85,7 +87,7 @@ Write-Host ''
 Write-Host '=== IT Ops Console setup ==============================================' 
 Write-Host ''
 Write-Host 'This will download five small open-source tools, wire them together,'
-Write-Host 'and put two shortcuts on your desktop. Collection against your tenant'
+Write-Host 'and put three shortcuts on your desktop. Collection against your tenant'
 Write-Host 'is read-only, and you sign in yourself - nothing stores a password.'
 Write-Host ''
 Write-Host 'It asks ONE question now and two at the end. When the window pauses,'
@@ -329,7 +331,22 @@ if ($onWindows) {
     $lnk.WorkingDirectory = $consoleDir
     $lnk.Description = 'Run every collector (you sign in), then rebuild the console'
     $lnk.Save()
-    Write-Host '  created: "IT Ops Console" and "Refresh IT Ops Data"'
+
+    # The Alerts tab can only hand you your settings as text - a page cannot
+    # write into this folder. This icon is the other half: it takes what you
+    # copied and merges it into alerts.ini.
+    $applyPs1 = Join-Path $consoleDir 'apply-alerts.ps1'
+    if (Test-Path $applyPs1) {
+        $lnk = $shell.CreateShortcut((Join-Path $desktop 'Apply Alert Settings.lnk'))
+        $lnk.TargetPath = 'powershell.exe'
+        $lnk.Arguments = "-NoProfile -NoExit -ExecutionPolicy Bypass -File `"$applyPs1`""
+        $lnk.WorkingDirectory = $consoleDir
+        $lnk.Description = 'Apply the alert settings you saved on the console''s Alerts tab'
+        $lnk.Save()
+        Write-Host '  created: "IT Ops Console", "Refresh IT Ops Data" and "Apply Alert Settings"'
+    } else {
+        Write-Host '  created: "IT Ops Console" and "Refresh IT Ops Data"'
+    }
 } else {
     Write-Host '  (not Windows - skipping shortcuts)'
 }

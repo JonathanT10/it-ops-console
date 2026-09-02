@@ -61,12 +61,13 @@ IT Ops Suite v$Version
 Double-click Setup-IT-Ops-Console.cmd. That is the whole instruction.
 
 It installs to C:\IT-Ops (you can change that at the one question it asks),
-puts two shortcuts on your desktop, asks how the console should stay fresh,
+puts three shortcuts on your desktop, asks how the console should stay fresh,
 and offers to run the first collection:
 
   Refresh IT Ops Data   collects from Microsoft 365 (you sign in, read-only)
                         and rebuilds your console, with live progress
   IT Ops Console        opens the result in your browser
+  Apply Alert Settings  applies alert changes you made on the Alerts tab
 
 Keeping it fresh - setup's last question, three answers (re-run setup to
 change it):
@@ -82,10 +83,13 @@ change it):
                                                password is stored anywhere)
 
 Alerts (optional): the console works out what needs a person on every
-refresh. To have that sent to a Teams channel or an email address, edit
-C:\IT-Ops\tools\it-ops-console\alerts.ini (one yes/no or number per rule),
-then run  python notify.py --test  from that folder. Messages go out only
-when something is new, worse or cleared - plus one weekly summary.
+refresh. To have that sent to a Teams channel or an email address, put your
+channel's Workflows URL (or a mail relay) in
+C:\IT-Ops\tools\it-ops-console\alerts.ini, then run  python notify.py --test
+from that folder. Messages go out only when something is new, worse or
+cleared - plus one weekly summary. After that you never need the file again:
+change what you are told about on the console's Alerts tab, click "Save
+settings", and double-click "Apply Alert Settings" on your desktop.
 
 Everything against your tenant is read-only. Nothing stores a password.
 Setup locks the C:\IT-Ops folder to you and Administrators, so the data it
