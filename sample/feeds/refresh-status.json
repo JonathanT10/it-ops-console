@@ -1,0 +1,47 @@
+{
+  "GeneratedUtc": "2026-08-31T07:00:41Z",
+  "Scheduled": true,
+  "Final": true,
+  "Ok": true,
+  "Message": "Everything ran and your console was rebuilt with fresh data. It covers 186 people, and flagged 14 unused paid seats worth a look.",
+  "SignIn": {
+    "Mode": "user",
+    "Ok": true,
+    "Detail": "Signed in with read-only access",
+    "Dropped": []
+  },
+  "Steps": [
+    {
+      "Step": "entra-tenant-docs",
+      "Status": "ok",
+      "Detail": ""
+    },
+    {
+      "Step": "entra-security-snapshot",
+      "Status": "ok",
+      "Detail": ""
+    },
+    {
+      "Step": "m365-license-waste-report",
+      "Status": "ok",
+      "Detail": ""
+    },
+    {
+      "Step": "print-fleet-collector",
+      "Status": "ok",
+      "Detail": ""
+    },
+    {
+      "Step": "console build",
+      "Status": "ok",
+      "Detail": ""
+    }
+  ],
+  "Schedule": {
+    "Mode": "while-signed-in",
+    "Time": "07:00",
+    "RunAs": "CONTOSO\\\\sam"
+  },
+  "KeepSignedIn": true,
+  "Certificate": null
+}
