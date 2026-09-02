@@ -143,11 +143,34 @@ def licensing_model(feed):
 STALE_DEVICE_HOURS = 48
 
 
-def fleet_model(feed):
+def fleet_as_of(feed):
+    """The moment a fleet feed was taken - the newest last_seen it holds.
+
+    Used to render the bundled sample as of its own moment instead of today's.
+    Returns None for a real feed with nothing in it, and callers then fall back
+    to the real clock.
+    """
+    if not feed or not feed.ok:
+        return None
+    seen = [parse_ts((e.get("device") or {}).get("last_seen"))
+            for e in (feed.data or {}).get("devices", [])]
+    seen = [t for t in seen if t]
+    return max(seen) if seen else None
+
+
+def fleet_model(feed, now=None):
+    """Printers, as of `now` (default: actually now).
+
+    `now` exists for the bundled sample. Its database is a snapshot of one
+    moment, and a device is called offline by comparing last_seen against the
+    clock - so left alone, the demo turns every printer offline a few days
+    after the sample was made, and the tests that depend on those statuses
+    start failing on a date rather than on a change.
+    """
     if not feed.ok:
         return None
     rows = []
-    now = utcnow()
+    now = now or utcnow()
     for entry in feed.data["devices"]:
         dev, snap = entry["device"], entry["snapshot"]
         last_seen = parse_ts(dev.get("last_seen"))
