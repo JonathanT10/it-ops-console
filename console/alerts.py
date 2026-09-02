@@ -405,7 +405,7 @@ CATALOG = [
     # identity
     Rule("ca_gap_critical", "identity", "A critical Conditional Access gap", "switch", True, "critical",
          ev_ca_gap_critical, help="A must-have sign-in protection is missing (MFA for everyone, legacy auth blocked, admins covered)."),
-    Rule("ca_gap_warning", "identity", "A Conditional Access gap worth a look", "switch", False, "warning",
+    Rule("ca_gap_warning", "identity", "A Conditional Access gap worth a look", "switch", True, "warning",
          ev_ca_gap_warning, help="Weaker gaps: report-only policies lingering, guests uncovered, unused locations."),
     Rule("app_credential_expired", "identity", "An app credential has expired", "switch", True, "critical",
          ev_app_credential_expired, help="A registered app's secret or certificate is past its date - whatever uses it has stopped working."),
@@ -777,12 +777,17 @@ def _ini_value(rule):
 
 def render_example_ini():
     lines = [
-        "# alerts.ini - what the IT Ops Console tells you about, and where. Safe to edit.",
+        "# alerts.ini - what the IT Ops Console flags, and where it tells you. Safe to edit.",
+        "#",
+        "# The rules below do two jobs: they decide what lands in \"Needs a human\" on",
+        "# the overview, and what is worth a message. Turning one off takes it off both;",
+        "# the domain page itself still shows everything.",
         "#",
         "# Every line is a yes/no or a number. Change one, save, and the next refresh",
         "# uses it. Blank or 0 on a number turns that rule off. Lines starting with",
-        "# ; or # are comments. The Alerts page in the console shows exactly how this",
-        "# file was read, including any line it could not use.",
+        "# ; or # are comments. You can change all of this on the console's Alerts tab",
+        "# instead of editing here - it shows how this file was read, including any",
+        "# line it could not use.",
         "#",
         "# Alerts carry the same names the console shows (admin accounts, licence",
         "# holders, printer names). Send them to a channel whose members should see",

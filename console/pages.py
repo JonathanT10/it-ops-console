@@ -109,6 +109,35 @@ def _refresh_banners(refresh):
     return "".join(out)
 
 
+# The overview shows the sharp end of the alert rules: what a person would act
+# on this week. Two caps keep it readable when one rule finds a lot - severity
+# order means a critical is never the thing that gets cut.
+PANEL_SEVERITIES = ("critical", "warning")
+PANEL_PER_RULE = 5
+PANEL_TOTAL = 12
+
+
+def _needs_a_human(fired):
+    """(rows to show, {rule: how many more of that rule there are})."""
+    items = [a for a in (fired or [])
+             if a.get("severity") in PANEL_SEVERITIES
+             and not a.get("transient")
+             and a.get("tab") != "refresh"]
+    kept, extra, seen = [], {}, {}
+    for a in items:
+        n = seen[a["rule"]] = seen.get(a["rule"], 0) + 1
+        if n <= PANEL_PER_RULE:
+            kept.append(a)
+        else:
+            extra[a["rule"]] = extra.get(a["rule"], 0) + 1
+    shown = kept[:PANEL_TOTAL]
+    for a in kept[PANEL_TOTAL:]:
+        extra[a["rule"]] = extra.get(a["rule"], 0) + 1
+    # Only talk about the remainder of a rule that is actually on the page.
+    on_page = {a["rule"] for a in shown}
+    return shown, {r: n for r, n in extra.items() if r in on_page}
+
+
 def build_overview(models, feeds, available, generated):
     tiles = []
 
@@ -203,56 +232,31 @@ def build_overview(models, feeds, available, generated):
     else:
         tiles.append(tile("changes", "What changed", "", "", feeds.get("history")))
 
-    # Anything that needs a human, gathered from every domain that loaded.
-    # Deliberately narrow: things you would act on this week, not everything
-    # every page flags. Informational findings stay on their own page.
-    urgent = []
-
-    def urge(rank, domain, what, detail, action):
-        urgent.append((rank, domain, what, detail or "", action or ""))
-
-    if ident:
-        for g in ident["gaps_failing"]:
-            sev = g.get("Severity")
-            if sev in ("critical", "warning"):
-                urge(0 if sev == "critical" else 2, "Identity",
-                     "CA gap: %s" % g.get("Title"), g.get("Detail"),
-                     next_step("ca-gap", g.get("Id")))
-    if sec:
-        for a in sec["admins_without_mfa"][:5]:
-            urge(0, "Security", "Admin without MFA: %s" % a.get("DisplayName"), a.get("Roles"),
-                 next_step("admin-no-mfa"))
-    if fl:
-        for d in fl["attention"]:
-            if d["status"] in ("error", "offline"):
-                urge(1, "Print fleet", "%s: %s" % (d["name"], d["status"]), d["detail"],
-                     next_step("fleet", d["status"]))
-    if lic:
-        # A disabled account still holding a paid seat is money leaking, and it
-        # is the one licensing finding that needs no conversation first.
-        for c in lic["disabled_holders"][:5]:
-            urge(2, "Licensing",
-                 "Disabled account still licensed: %s" % (c.get("DisplayName") or c.get("UserPrincipalName")),
-                 c.get("Licenses") or c.get("Reason"),
-                 next_step("disabled-licensed"))
-
-    urgent.sort(key=lambda u: u[0])
+    # Anything that needs a human, taken straight from the alert rules so the
+    # page and the messages can never disagree about what counts. Left out on
+    # purpose: informational findings (they stay on their own page), change
+    # EVENTS (history, not open items), and the refresh's own troubles, which
+    # already have a banner at the top of this page and the stale list below.
+    urgent, extra = _needs_a_human(models.get("fired"))
     urgent_html = ""
     if urgent:
-        shown = urgent[:12]
-        rows = "".join(
-            '<div class="chg"><span class="kind">%s</span><span>%s%s%s</span></div>'
-            % (esc(dom), esc(what),
-               (' <span class="cat">&mdash; %s</span>' % esc(detail)) if detail else "",
-               _act(action))
-            for _rank, dom, what, detail, action in shown)
-        note = ("Pulled from every domain below. %d item%s."
-                % (len(urgent), "" if len(urgent) == 1 else "s"))
-        if len(shown) < len(urgent):
-            note = ("Pulled from every domain below. Top %d of %d - the rest are on their own pages."
-                    % (len(shown), len(urgent)))
+        rows = []
+        for i, a in enumerate(urgent):
+            rows.append('<div class="chg"><span class="kind">%s</span><span>%s%s%s</span></div>'
+                        % (esc(a["tab_label"]), esc(a["title"]),
+                           (' <span class="cat">&mdash; %s</span>' % esc(a["detail"])) if a.get("detail") else "",
+                           _act(a.get("action"))))
+            # "+3 more like this" goes right under the last row of its rule.
+            nxt = urgent[i + 1]["rule"] if i + 1 < len(urgent) else None
+            more = extra.get(a["rule"])
+            if more and a["rule"] != nxt:
+                rows.append('<div class="chg"><span class="kind">%s</span>'
+                            '<span class="muted">+%d more like this on the <a href="%s.html">%s page</a>'
+                            '</span></div>' % (esc(a["tab_label"]), more, esc(a["tab"]), esc(a["tab_label"])))
+        note = ('The same things the console would tell you about, from every domain below. '
+                'Change what counts on the <a href="alerts.html">Alerts</a> tab.')
         urgent_html = ('<section><h2>Needs a human</h2>'
-                       '<p class="note">%s</p>%s</section>' % (note, rows))
+                       '<p class="note">%s</p>%s</section>' % (note, "".join(rows)))
 
     # refresh_status is about the refresh itself, not a domain: when it is old,
     # every real feed is old too and already listed - naming it again is noise.
@@ -859,7 +863,8 @@ def build_alerts(am, available, generated):
                                (' <span class="cat">&mdash; %s</span>' % esc(a["detail"])) if a.get("detail") else "",
                                _act(a.get("action"))))
         firing = ('<section><h2>Firing now</h2><p class="note">%d alert%s from the rules that are on. '
-                  'Whether a message goes out depends on what changed since the last one.</p>%s</section>'
+                  'The sharp end of this list is what the overview shows as needing a human; whether a '
+                  'message goes out depends on what changed since the last one.</p>%s</section>'
                   % (n, "" if n == 1 else "s", "".join(rows)))
     else:
         firing = ('<section><h2>Firing now</h2><p class="note">Nothing - every rule that is on is quiet.'
@@ -927,11 +932,13 @@ def build_alerts(am, available, generated):
         '<noscript><p class="note">This page needs JavaScript to build the settings for you. '
         'Without it, edit alerts.ini directly - every rule above is one line in that file.</p></noscript>')
 
-    watched = ('<section><h2>Change what you are told about</h2>'
-               '<p class="note">Tick, untick, or change a number - 0 means off; the box beside a tab '
-               'name silences that whole tab at once. Then click <b>Save settings</b> and double-click '
-               '<b>Apply Alert Settings</b> on your desktop. Nothing here changes until you do both.</p>'
-               '%s%s%s</section>'
+    watched = ('<section><h2>Change what the console flags</h2>'
+               '<p class="note">These settings do two jobs: they decide what lands in '
+               '<b>Needs a human</b> on the overview, and what is worth a message. Turning one off '
+               'takes it off both - the domain page itself still shows everything. Tick, untick, or '
+               'change a number - 0 means off; the box beside a tab name silences that whole tab at '
+               'once. Then click <b>Save settings</b> and double-click <b>Apply Alert Settings</b> on '
+               'your desktop. Nothing here changes until you do both.</p>%s%s%s</section>'
                % (send_ctl, "".join(tables), savebox))
 
     # -- how the file was read ------------------------------------------- #
