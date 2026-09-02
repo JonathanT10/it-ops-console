@@ -347,16 +347,20 @@ def _lic_snap(ts, unassigned, reclaim, users=100, costing=None):
 
 
 def test_trends_model():
-    day = lambda n, h=12: iso(NOW - timedelta(days=n, hours=-h) - timedelta(hours=12))  # noqa: E731
-    # Three days of history plus the current snapshot; day 0 appears TWICE in
-    # history (an early run and a later one) to prove the per-day collapse.
+    # Anchor "today" at noon UTC so the intra-day fixtures below (an earlier run
+    # and a later run on the same day) can never straddle midnight - a test that
+    # passes at 15:00 and fails at 00:04 is a test of the clock, not the code.
+    base = NOW.replace(hour=12, minute=0, second=0, microsecond=0)
+    day = lambda n: iso(base - timedelta(days=n))  # noqa: E731
+    # Three days of history plus the current snapshot; today appears TWICE
+    # (an early run and a later one) to prove the per-day collapse.
     hist = Feed("security_history", "Security trend", "h", data=[
         _sec_snap(day(3), 80.0, 5, 9, legacy=40),
         _sec_snap(day(2), 85.0, 4, 8, legacy=30),
-        _sec_snap(day(1), 88.0, 4, 6, legacy=20),                          # stale flat from here
-        _sec_snap(iso(NOW - timedelta(hours=6)), 89.0, 4, 6, legacy=12),   # earlier today
+        _sec_snap(day(1), 88.0, 4, 6, legacy=20),                           # stale flat from here
+        _sec_snap(iso(base - timedelta(hours=6)), 89.0, 4, 6, legacy=12),   # today, 06:00
     ], ts=NOW)
-    cur = Feed("security", "Security", "c", data=_sec_snap(iso(NOW), 91.0, 3, 6, legacy=10), ts=NOW)
+    cur = Feed("security", "Security", "c", data=_sec_snap(iso(base), 91.0, 3, 6, legacy=10), ts=NOW)
     t = model.trends_model(hist, cur, None, None)
     s = t["security"]
     check("trends: one point per day, latest wins (4 days from 5 snapshots)", s["points"] == 4)
