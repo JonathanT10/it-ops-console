@@ -102,7 +102,11 @@ function Get-Item {
     [CmdletBinding()] param([Parameter(Position=0)][string]$Path, [string]$LiteralPath, [switch]$Force)
     if ($Path -like 'Cert:*') {
         if ($env:ITOPS_STUB_CERT_NOTAFTER) {
-            return [pscustomobject]@{ NotAfter = [datetime]$env:ITOPS_STUB_CERT_NOTAFTER; Thumbprint = ($Path -split '[\\/]')[-1] }
+            return [pscustomobject]@{
+                NotAfter      = [datetime]$env:ITOPS_STUB_CERT_NOTAFTER
+                Thumbprint    = ($Path -split '[\\/]')[-1]
+                HasPrivateKey = ($env:ITOPS_STUB_CERT_NOKEY -ne '1')
+            }
         }
         throw "Cannot find path '$Path' because it does not exist."
     }
@@ -112,7 +116,7 @@ function Get-Item {
 '@
 
 function Run-Case {
-    param([string]$Graph, [string]$CertNotAfter, [string]$IniText, [switch]$Desktop, [switch]$NoConnect, [int]$Timeout = 30)
+    param([string]$Graph, [string]$CertNotAfter, [string]$IniText, [switch]$Desktop, [switch]$NoConnect, [switch]$NoKey, [int]$Timeout = 30)
     if (Test-Path $log) { Remove-Item $log }
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     if (Test-Path $site) { Remove-Item $site -Recurse -Force }
@@ -122,6 +126,7 @@ function Run-Case {
     Remove-Item (Join-Path $tools 'm365-license-waste-report/prices.ini') -ErrorAction SilentlyContinue
     $env:ITOPS_STUB_GRAPH = $Graph
     $env:ITOPS_STUB_CERT_NOTAFTER = $CertNotAfter
+    $env:ITOPS_STUB_CERT_NOKEY = if ($NoKey) { '1' } else { $null }
     $flags = @()
     if (-not $Desktop) { $flags += '-Scheduled' }
     if ($NoConnect) { $flags += '-NoConnect' }
@@ -235,9 +240,9 @@ Write-Host '-- 6. unattended, certificate valid, app sign-in rejected by Microso
 $r = Run-Case -Graph 'user-ok' -IniText $iniApp -CertNotAfter $plus700
 Check 'exit 0' ($r.Code -eq 0)
 Check 'app attempted once' ((Count $r.Log 'connect app*') -eq 1)
-Check 'reason kept verbatim' (@($r.Status.SignIn.Dropped)[0] -like 'Signing in as the registered app failed: AADSTS700027*')
+Check 'plain words first, the code still there to search for' (@($r.Status.SignIn.Dropped)[0] -like 'Signing in as the registered app failed: Microsoft 365 does not recognise this certificate any more.*' -and @($r.Status.SignIn.Dropped)[0] -like '*AADSTS700027*')
 Check 'mode user' ($r.Status.SignIn.Mode -eq 'user')
-Check 'overview: fall-back banner' ($r.Index -like '*couldn&#x27;t use its usual sign-in: Signing in as the registered app failed: AADSTS700027*')
+Check 'overview: fall-back banner' ($r.Index -like '*couldn&#x27;t use its usual sign-in: Signing in as the registered app failed: Microsoft 365 does not recognise this certificate*')
 
 Write-Host ''
 Write-Host '-- 7. unattended, certificate NOT in the store, nobody finishes the window: two drops, stop cleanly'
@@ -264,6 +269,37 @@ Check 'reason recorded' (@($r.Status.SignIn.Dropped)[0] -like 'The sign-in did n
 Check 'console built' ($r.Index.Length -gt 0)
 Check 'no banner for an unscheduled run' ($r.Index -notlike '*class="banner*')
 Check 'plain words in the summary' ($r.Text -like '*In plain words:*' -and $r.Text -like '*sign-in: The sign-in did not complete*')
+
+Write-Host ''
+Write-Host '-- 9b. THE BUG: desktop click on an UNATTENDED machine'
+# The certificate lives in the computer's store, where only SYSTEM and
+# Administrators can open its private key. A person clicking Refresh at their
+# desk could see it, tried to use it, failed on "Keyset does not exist", and
+# got a browser sign-in window - every single time. A manual run must not
+# reach for that certificate at all, and must not sign the person out at the
+# end, or the next click asks them to pick their account again.
+$r = Run-Case -Graph 'user-ok' -IniText $iniApp -CertNotAfter $plus700 -Desktop
+Check '9b exit 0' ($r.Code -eq 0)
+Check '9b the certificate is never touched by a manual run' ((Count $r.Log 'connect app*') -eq 0)
+Check '9b nothing is reported as a failed rung' (@($r.Status.SignIn.Dropped).Count -eq 0)
+Check '9b it says whose sign-in this is, in plain words' ($r.Text -like '*for the scheduled refresh, which runs as this computer*')
+Check '9b signed in as the person' ($r.Status.SignIn.Mode -eq 'user' -and (Count $r.Log 'connect user*') -eq 1)
+Check '9b STAYS signed in, so the next click does not ask again' ((Count $r.Log 'disconnect') -eq 0)
+Check '9b and says so' ($r.Text -like '*Staying signed in to Microsoft 365*')
+Check '9b no banner - nothing went wrong' ($r.Index -notlike '*class="banner*')
+
+Write-Host ''
+Write-Host '-- 9c. the same machine on its 07:00 schedule still uses the certificate'
+$r = Run-Case -Graph 'app-ok' -IniText $iniApp -CertNotAfter $plus700
+Check '9c mode app' ($r.Status.SignIn.Mode -eq 'app')
+Check '9c the certificate IS used when nobody is there' ((Count $r.Log 'connect app*') -eq 1)
+Check '9c an app sign-in is always closed' ((Count $r.Log 'disconnect') -eq 1)
+
+Write-Host ''
+Write-Host '-- 9d. scheduled run, certificate present but its key cannot be opened'
+$r = Run-Case -Graph 'user-ok' -IniText $iniApp -CertNotAfter $plus700 -NoKey
+Check '9d the app rung is refused before it is attempted' ((Count $r.Log 'connect app*') -eq 0)
+Check '9d and the reason is a sentence, not a crypto error' (@($r.Status.SignIn.Dropped)[0] -like '*no private key*' -and @($r.Status.SignIn.Dropped)[0] -like '*Re-run setup as an administrator*')
 
 Write-Host ''
 Write-Host '-- 10. -NoConnect: the session you opened yourself'

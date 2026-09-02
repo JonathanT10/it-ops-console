@@ -534,6 +534,40 @@ def _discovery_feed(**over):
     return Feed("fleet_discovery", "Printer discovery", "fleet-discovery.json", data=d, ts=NOW)
 
 
+def test_sample_does_not_rot():
+    """The bundled sample must look the same in a year as it does today.
+
+    Its fleet database is a snapshot of one moment, and "offline" is decided by
+    comparing last_seen against the clock. Rendered against today's clock, every
+    printer in the demo turns offline a few days after the sample was made - and
+    the rules that depend on those statuses stop firing on a DATE rather than on
+    a change. This caught exactly that, two days after the sample was made.
+    """
+    cfg, feeds = load_all(os.path.join(ROOT_DIR, "sample", "sources.ini"))
+    as_of = model.fleet_as_of(feeds["fleet"])
+    check("sample: the fleet feed knows its own moment", as_of is not None)
+
+    m = model.fleet_model(feeds["fleet"], now=as_of)
+    kinds = {d["status"] for d in m["devices"]}
+    check("sample: rendered as of its own moment, the demo still has live printers",
+          "ok" in kinds or "warning" in kinds)
+    check("sample: and it is not all one status",
+          len(kinds) > 1 and m["online"] > 0)
+
+    # A year from now must render exactly the same as today.
+    later = model.fleet_model(feeds["fleet"], now=as_of + timedelta(days=365))
+    check("sample: pinned to its moment it does not drift with the calendar",
+          [d["status"] for d in m["devices"]] == [d["status"] for d in
+              model.fleet_model(feeds["fleet"], now=as_of)["devices"]])
+    check("sample: and the wall clock is what would have rotted it",
+          all(d["status"] == "offline" for d in later["devices"]))
+
+    # A real feed still uses the real clock - this is a sample-only courtesy.
+    live = model.fleet_model(feeds["fleet"])
+    check("sample: a real feed is still judged against the real clock",
+          all(d["status"] == "offline" for d in live["devices"]))
+
+
 def test_discovery_model():
     m = model.discovery_model(_discovery_feed())
     by = {p["name"]: p for p in m["places"]}
@@ -799,7 +833,9 @@ def _sample_models():
     models["identity"] = model.identity_model(feeds["tenant"], feeds.get("run_summary"))
     models["security"] = model.security_model(feeds["security"], models["identity"])
     models["licensing"] = model.licensing_model(feeds["licensing"])
-    models["fleet"] = model.fleet_model(feeds["fleet"])
+    # As of the sample's own moment, not today's - otherwise these rules stop
+    # firing on a date rather than on a change.
+    models["fleet"] = model.fleet_model(feeds["fleet"], now=model.fleet_as_of(feeds["fleet"]))
     models["changes"] = model.changes_model(feeds["history"], feeds.get("run_summary"))
     models["refresh"] = model.refresh_model(feeds.get("refresh_status"))
     return models, feeds
@@ -1270,6 +1306,7 @@ def main():
         test_trends_model()
         test_trends_render()
         test_fleet_model(tmp)
+        test_sample_does_not_rot()
         test_discovery_model()
         test_where_we_look_page()
         test_changes_model()
