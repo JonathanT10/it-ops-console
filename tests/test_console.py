@@ -14,7 +14,9 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HERE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(HERE_DIR)
+sys.path.insert(0, ROOT_DIR)
 
 from console import model, pages                      # noqa: E402
 from console.render import write_page                 # noqa: E402
@@ -509,6 +511,128 @@ def test_fleet_model(tmp):
     check("fleet: attention includes offline + warning", len(m["attention"]) == 2)
 
 
+def _discovery_feed(**over):
+    """The document the printer collector writes beside fleet.db."""
+    d = {
+        "GeneratedUtc": iso(NOW), "RescanHours": 24, "MaxAddresses": 1024,
+        "LastScanUtc": iso(NOW - timedelta(hours=2)), "ScannedThisRun": True,
+        "Ranges": [
+            {"Name": "Office", "Spec": "10.0.10.0/24", "Addresses": 254,
+             "LastScanUtc": iso(NOW - timedelta(hours=2)), "Found": 3, "Problem": None},
+            {"Name": "New VLAN", "Spec": "10.0.40.0/24", "Addresses": 254,
+             "LastScanUtc": None, "Found": 0, "Problem": None},
+            {"Name": "Old VLAN", "Spec": "10.0.0.0/8", "Addresses": 0,
+             "LastScanUtc": iso(NOW - timedelta(hours=2)), "Found": 0,
+             "Problem": "'10.0.0.0/8' is 16,777,214 addresses, and the limit is 1,024."},
+        ],
+        "Ignored": ["10.0.10.99"],
+        "FoundThisScan": [{"Ip": "10.0.10.34", "Name": "Lobby MFP", "Range": "Office"}],
+        "NonPrinters": 6,
+        "Problems": ["Old VLAN: '10.0.0.0/8' is 16,777,214 addresses, and the limit is 1,024."],
+    }
+    d.update(over)
+    return Feed("fleet_discovery", "Printer discovery", "fleet-discovery.json", data=d, ts=NOW)
+
+
+def test_discovery_model():
+    m = model.discovery_model(_discovery_feed())
+    by = {p["name"]: p for p in m["places"]}
+    check("discovery: every configured place gets a row", len(m["places"]) == 3)
+    check("discovery: a scanned place reports what it found",
+          by["Office"]["found"] == 3 and by["Office"]["addresses"] == 254
+          and by["Office"]["last_scan"] is not None)
+    check("discovery: a place added since the last scan says so rather than reading as empty",
+          by["New VLAN"]["last_scan"] is None
+          and by["New VLAN"]["last_scan_text"] == "not looked at yet")
+    check("discovery: a place that could not be scanned carries the reason",
+          "16,777,214" in by["Old VLAN"]["problem"])
+    check("discovery: the reason is repeated where a person will see it",
+          len(m["problems"]) == 1 and "Old VLAN" in m["problems"][0])
+    check("discovery: what the last scan turned up is kept",
+          m["found_this_scan"] == [{"ip": "10.0.10.34", "name": "Lobby MFP", "range": "Office"}])
+    check("discovery: things that answered but were not printers are counted, not listed",
+          m["non_printers"] == 6)
+    check("discovery: the settings the page edits come through",
+          m["rescan_hours"] == 24 and m["ignored"] == ["10.0.10.99"]
+          and m["max_addresses"] == 1024)
+    check("discovery: a place that could not be scanned counts as no addresses",
+          m["addresses_total"] == 508)
+
+    # A collector that has never scanned, and one that has never run at all.
+    quiet = model.discovery_model(_discovery_feed(ScannedThisRun=False, FoundThisScan=[],
+                                                  LastScanUtc=None))
+    check("discovery: a run that did not scan is not a run that found nothing",
+          quiet["scanned_this_run"] is False and quiet["last_scan"] is None
+          and quiet["found_this_scan"] == [])
+    check("discovery: no discovery file at all is a normal state, not an error",
+          model.discovery_model(None) is None
+          and model.discovery_model(Feed("fleet_discovery", "x", "p",
+                                         error="no such file")) is None)
+
+    # The console reads keys the collector writes; the bundled sample is the
+    # only place those two agree in this repo, so it has to stay in step.
+    with open(os.path.join(ROOT_DIR, "sample", "feeds",
+                           "fleet-discovery.json"), encoding="utf-8") as fh:
+        sample = model.discovery_model(Feed("fleet_discovery", "x", "p",
+                                            data=json.load(fh), ts=NOW))
+    check("discovery: the bundled sample fills in every field the page uses",
+          sample is not None and sample["places"] and sample["ignored"]
+          and sample["rescan_hours"] and sample["max_addresses"]
+          and sample["found_this_scan"] and sample["non_printers"]
+          and sample["problems"] and sample["last_scan"] is not None
+          and all(p["spec"] and p["name"] for p in sample["places"]))
+
+
+def test_where_we_look_page():
+    """The Print fleet tab's editor: it has to show what the collector did,
+    and produce settings that say the same thing."""
+    d = model.discovery_model(_discovery_feed())
+    feed = Feed("fleet", "Print fleet", None)
+    html = pages.build_fleet(None, feed, {"index": True, "fleet": True}, "now", discovery=d)
+    check("where we look: the section is on the page even with no printers yet",
+          "Where we look" in html and 'data-rowsec="ranges"' in html)
+    check("where we look: every place has a row with its name and its address",
+          html.count('<input type="text" data-row="name"') == len(d["places"]) + 2
+          and 'value="10.0.10.0/24"' in html and 'value="Old VLAN"' in html)
+    check("where we look: a row says what the last look found",
+          "254 addresses" in html and "3 found" in html)
+    check("where we look: a place not looked at yet says so on its row",
+          "not looked at yet" in html)
+    check("where we look: what could not be scanned is said twice - once loudly",
+          html.count("16,777,214") >= 2 and 'class="banner warning"' in html)
+    check("where we look: the newly found printer is named",
+          "Lobby MFP" in html and "10.0.10.34" in html)
+    check("where we look: the scan is described before it is offered",
+          "one SNMP request goes to every address" in html and "1,024 addresses is refused" in html)
+    check("where we look: the two settings are editable",
+          'data-sec="discovery" data-key="rescan_hours"' in html
+          and 'data-sec="discovery" data-key="ignore"' in html
+          and 'value="10.0.10.99"' in html)
+    check("where we look: it says what to do with what you changed",
+          "Save settings" in html and "Apply Settings" in html)
+    check("where we look: exactly one script, and it is the console's own",
+          html.count("<script>") == 1 and "PLACE_PATTERN" in html)
+    check("where we look: nothing about SNMP credentials is on the page",
+          "public" not in html and "[snmp]" not in html)
+
+    # With no discovery file at all the section is still offered, with defaults.
+    plain = pages.build_fleet(None, feed, {"index": True, "fleet": True}, "now")
+    check("where we look: offered before discovery has ever run",
+          "Where we look" in plain and 'data-rowsec="ranges"' in plain
+          and 'data-key="rescan_hours" value="24"' in plain)
+    check("where we look: and nothing is claimed to have been found",
+          "not looked at yet" not in plain and "16,777,214" not in plain)
+
+    # A hostile name from the config file must not become markup.
+    nasty = model.discovery_model(_discovery_feed(Ranges=[
+        {"Name": "<script>alert(1)</script>", "Spec": "10.0.10.0/24", "Addresses": 1,
+         "LastScanUtc": None, "Found": 0, "Problem": "<img src=x onerror=alert(1)>"}]))
+    bad = pages.build_fleet(None, feed, {"index": True, "fleet": True}, "now", discovery=nasty)
+    check("where we look: a name out of the config file is escaped",
+          "<script>alert(1)</script>" not in bad and "<img src=x onerror" not in bad
+          and "&lt;script&gt;" in bad)
+
+
 def test_changes_model():
     def snap(ts, policies, roles=None, apps=None):
         return {"GeneratedUtc": ts,
@@ -622,7 +746,8 @@ def test_refresh_render():
     from console import render as _r
     feeds = {k: Feed(k, k, None) for k in
              ("tenant", "run_summary", "security", "licensing", "history", "fleet")}
-    models = {k: None for k in ("identity", "security", "licensing", "fleet", "changes")}
+    models = {k: None for k in ("identity", "security", "licensing", "fleet",
+                                "changes", "discovery")}
     available = {"index": True, "identity": False, "security": False,
                  "licensing": False, "fleet": False, "changes": False}
 
@@ -988,7 +1113,7 @@ def test_alerts_page():
           and 'data-key="digest_day"' in html and 'data-key="console_link"' in html)
     check("alerts page: a save box and the two-step instruction",
           'id="settings-text"' in html and 'id="save-btn"' in html
-          and "Apply Alert Settings" in html and "<noscript>" in html)
+          and "Apply Settings" in html and "<noscript>" in html)
     # console-site is a folder people copy onto shares, so the page must never
     # carry the Workflows URL - and the editor must not offer to change it.
     check("alerts page: the editor never carries where alerts go",
@@ -1028,7 +1153,8 @@ def _all_pages(models, feeds, available):
         "identity": pages.build_identity(models["identity"], feeds["tenant"], available, gen),
         "security": pages.build_security(models["security"], feeds["security"], available, gen),
         "licensing": pages.build_licensing(models["licensing"], feeds["licensing"], available, gen),
-        "fleet": pages.build_fleet(models["fleet"], feeds["fleet"], available, gen),
+        "fleet": pages.build_fleet(models["fleet"], feeds["fleet"], available, gen,
+                                   discovery=models.get("discovery")),
         "changes": pages.build_changes(models["changes"], feeds["history"], available, gen),
         "alerts": pages.build_alerts(models.get("alerts"), available, gen),
     }
@@ -1038,7 +1164,8 @@ def test_render_empty_console():
     """Nothing configured at all - every page must still render."""
     feeds = {k: Feed(k, k, None) for k in
              ("tenant", "run_summary", "security", "licensing", "history", "fleet")}
-    models = {k: None for k in ("identity", "security", "licensing", "fleet", "changes")}
+    models = {k: None for k in ("identity", "security", "licensing", "fleet",
+                                "changes", "discovery")}
     available = {"index": True, "identity": False, "security": False,
                  "licensing": False, "fleet": False, "changes": False}
     out = _all_pages(models, feeds, available)
@@ -1121,7 +1248,14 @@ def test_render_full(tmp):
           'class="refresh-note">Automatic refresh: every day at 07:00' in idx)
     check("render: sample overview has no banner (its last refresh worked)", 'class="banner' not in idx)
     with open(os.path.join(site, "fleet.html"), encoding="utf-8") as fh:
-        check("render: fleet page has meters", 'class="meter"' in fh.read())
+        fleet = fh.read()
+    check("render: fleet page has meters", 'class="meter"' in fleet)
+    check("render: the built sample carries the places-to-look editor",
+          "Where we look" in fleet and 'data-rowsec="ranges"' in fleet
+          and 'value="10.0.10.0/24"' in fleet)
+    check("render: the built sample never puts the SNMP community on a page",
+          all("public" not in open(os.path.join(site, n), encoding="utf-8").read()
+              for n in names)) 
 
 
 def main():
@@ -1136,6 +1270,8 @@ def main():
         test_trends_model()
         test_trends_render()
         test_fleet_model(tmp)
+        test_discovery_model()
+        test_where_we_look_page()
         test_changes_model()
         test_refresh_model()
         test_refresh_render()
