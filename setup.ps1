@@ -142,28 +142,48 @@ if ($haveBundle -and -not $bundleIsInstall) {
 foreach ($r in $REPOS) {
     $dest = Join-Path $tools $r
     $isConsole = ($r -eq 'it-ops-console')
-    if ((Test-Path $dest) -and -not $isConsole) {
-        Write-Host "  already present: $r  (delete the folder and re-run setup to refresh it)"
+    $present = Test-Path $dest
+    $bundled = Join-Path $bundleTools $r
+    $fromBundle = $haveBundle -and -not $bundleIsInstall -and (Test-Path $bundled)
+    # A release bundle IS the update: every tool refreshes from it, with your
+    # settings kept (see below). Without a bundle, only the console refreshes -
+    # it is the renderer and carries no data of yours (this setup rewrites its
+    # sources.ini) - and the other tools stay as installed.
+    if ($present -and -not $isConsole -and -not $fromBundle) {
+        Write-Host "  already present: $r  (install from a release bundle to update it)"
         continue
     }
-    if ((Test-Path $dest) -and $isConsole) {
-        # The console is the renderer and carries no data of yours (this setup
-        # rewrites its sources.ini below), so it refreshes on every run -
-        # "run setup again" is also how you update. Download first, swap only
-        # on success: a network hiccup must never leave a broken install.
-        if ($PSScriptRoot -and (Resolve-Path $PSScriptRoot).Path -eq (Resolve-Path $dest).Path) {
-            Write-Host "  already present: it-ops-console (setup is running from inside it)"
-            continue
-        }
-        Write-Host "  refreshing: it-ops-console (updates every time setup runs)"
-    } else {
-        Write-Host "  fetching: $r"
+    if ($present -and $isConsole -and $PSScriptRoot -and
+        (Resolve-Path $PSScriptRoot).Path -eq (Resolve-Path $dest).Path) {
+        Write-Host "  already present: it-ops-console (setup is running from inside it)"
+        continue
     }
-    $bundled = Join-Path $bundleTools $r
-    if ($haveBundle -and -not $bundleIsInstall -and (Test-Path $bundled)) {
-        if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+    if ($present) { Write-Host "  refreshing: $r" } else { Write-Host "  fetching: $r" }
+    if ($fromBundle) {
+        # Your settings survive an update: keep any .ini you edited (config.ini,
+        # prices.ini, sources.ini) and any database in the tool folder, then put
+        # them back once the fresh copy has landed. The bundle only ever ships
+        # the *.example.ini templates, so without this an update would silently
+        # replace your printer list with the example and the printers vanish.
+        $keep = @()
+        if (Test-Path $dest) {
+            $keep = @(Get-ChildItem -LiteralPath $dest -File | Where-Object {
+                ($_.Extension -eq '.ini' -and $_.Name -notlike '*.example.ini') -or $_.Extension -eq '.db' })
+            $stash = Join-Path ([IO.Path]::GetTempPath()) "itops-keep-$r-$([guid]::NewGuid().ToString('n').Substring(0,6))"
+            if ($keep.Count) {
+                $null = New-Item -ItemType Directory -Path $stash -Force
+                $keep | Copy-Item -Destination $stash
+            }
+            Remove-Item $dest -Recurse -Force
+        }
         Copy-Item $bundled $dest -Recurse
-        Write-Host "  installed from bundle: $r"
+        if ($keep.Count) {
+            Get-ChildItem -LiteralPath $stash -File | Copy-Item -Destination $dest -Force
+            Remove-Item $stash -Recurse -Force
+            Write-Host "  installed from bundle: $r  (kept your $($keep.Name -join ', '))"
+        } else {
+            Write-Host "  installed from bundle: $r"
+        }
         continue
     }
     $zip = Join-Path $tools "$r.zip"

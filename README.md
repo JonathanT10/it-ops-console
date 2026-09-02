@@ -112,10 +112,18 @@ touching the internet, and stamps its version into the console's footer so
 "which build are you on?" always has an answer. (Windows may show "Windows
 protected your PC" for a downloaded file — click **More info → Run anyway**.)
 
+**Updating is the same motion.** Download the newest release zip and run its
+`Setup-IT-Ops-Console.cmd` over your existing install: every tool is refreshed
+from the bundle and **your settings are kept** — `config.ini` (your printers),
+`prices.ini` (your per-seat prices), and any database sitting in a tool folder
+are set aside and put back, and setup tells you which ones it kept. Only the
+`*.example.ini` templates ever come from the bundle.
+
 No release handy? [`Setup-IT-Ops-Console.cmd`](Setup-IT-Ops-Console.cmd) alone
-works too — it downloads what the bundle would have carried. Releases are
-assembled by [`make-release.ps1`](make-release.ps1) from the repos' current
-main branches.
+works too — it downloads what the bundle would have carried, though on an
+existing install it refreshes only the console; use a release bundle to update
+the other tools. Releases are assembled by [`make-release.ps1`](make-release.ps1)
+from the repos' current main branches.
 
 Prefer to see what you are running first? Download [`setup.ps1`](setup.ps1)
 itself and right-click → **Run with PowerShell**. Same result. It creates
