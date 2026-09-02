@@ -32,12 +32,17 @@ zeroes that look like real numbers.
 ## The pages
 
 **Overview** — one tile per domain with its headline number, a "needs a human"
-panel that pulls the genuinely actionable items out of all four feeds into one
-list, and a freshness dot per feed. Every finding there — and wherever it
-reappears on its own page — carries a one-line plain-English next step: not
-just *what's wrong* but *what you do about it* ("exclude your break-glass
-accounts from every all-users MFA policy", "have them register at
-aka.ms/mfasetup"), so a reader can act without already knowing the answer.
+panel, and a freshness dot per feed. That panel is not a second opinion: it is
+**the alert rules** (see *Alerts* below), showing the critical and warning ones
+that are firing right now, so the front page and the messages can never
+disagree about what counts — and turning a rule off on the Alerts tab takes it
+off here too. Every finding there — and wherever it reappears on its own page —
+carries a one-line plain-English next step: not just *what's wrong* but *what
+you do about it* ("exclude your break-glass accounts from every all-users MFA
+policy", "have them register at aka.ms/mfasetup"), so a reader can act without
+already knowing the answer. Informational findings (a toner at 15%) stay on
+their own page, change events stay in the change log, and a refresh that went
+wrong has its own banner rather than a line here.
 
 **Identity** — tenant and user counts, Conditional Access policies by state, the
 CA gap analysis, directory roles by membership size, groups, authentication
@@ -203,11 +208,15 @@ thumbprint; nothing secret — and survives updates like every other `.ini`.
 
 ### Alerts — Teams or email, only when something changes
 
-Every refresh already works out what needs a human. Alerts send that to a
-Teams channel and/or an email address, and they are built so nobody learns to
-ignore them: by default a message goes out **only when an alert is new, has
-got worse, or has cleared** since the last message, grouped by tab, each line
-carrying the same plain-English next step the console shows. A weekly summary
+Every refresh already works out what needs a human — and the rules that decide
+that are the same ones that decide what is worth a message. One catalog, two
+jobs: the critical and warning alerts that are firing are what the overview
+lists under **Needs a human**, and alerts send them to a Teams channel and/or
+an email address. Turning a rule off takes it off both (the domain page itself
+still shows everything). They are built so nobody learns to ignore them: by
+default a message goes out **only when an alert is new, has got worse, or has
+cleared** since the last message, grouped by tab, each line carrying the same
+plain-English next step the console shows. A weekly summary
 (Mondays unless you change it) lists everything still open, or says "nothing
 open" — a heartbeat that also proves the refresh is running.
 
@@ -435,14 +444,17 @@ pwsh tests/test_run_all_signin.ps1
 pwsh tests/test_schedule_refresh.ps1
 ```
 
-`test_console.py` (204 checks) covers freshness classification, timestamp
+`test_console.py` (223 checks) covers freshness classification, timestamp
 parsing, feed degradation (corrupt JSON, missing files, unconfigured sources),
 every model, change detection, rendering with zero feeds configured, HTML
 escaping of hostile input, the automatic-refresh footer note and banners, the
 alert catalog (every rule fires and stays quiet on the right data, thresholds
 and silenced tabs honoured, `alerts.example.ini` identical to what the catalog
 renders, unusable lines reported), alert state (new / worse / cleared / told),
-the Alerts page, and a full sample build. `test_notify.py` (34 checks) runs
+the Alerts page, the overview panel being the rules themselves (a rule turned
+off or a threshold moved changes the front page; one noisy rule is capped at
+five rows with a pointer to its page; change events and refresh troubles stay
+out), and a full sample build. `test_notify.py` (34 checks) runs
 `notify.py` against a local fake webhook and a local fake mail relay: first run
 tells everything, a repeat stays quiet, new and worse speak, cleared is said
 once, events are never "cleared", the weekly digest fires on its day, a failed

@@ -98,6 +98,9 @@ def main():
         except (OSError, ValueError):
             astate = None
     models["alerts"] = pages.alerts_page_model(fired, acfg, astate, channels)
+    # The overview's "needs a human" list is these same alerts, so turning a
+    # rule off on the Alerts tab takes it off the front page too.
+    models["fired"] = fired
 
     available = {
         "index": True,
