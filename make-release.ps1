@@ -67,7 +67,8 @@ and offers to run the first collection:
   Refresh IT Ops Data   collects from Microsoft 365 (you sign in, read-only)
                         and rebuilds your console, with live progress
   IT Ops Console        opens the result in your browser
-  Apply Alert Settings  applies alert changes you made on the Alerts tab
+  Apply Settings        applies changes you made on the console's Alerts
+                        or Print fleet tab
 
 Keeping it fresh - setup's last question, three answers (re-run setup to
 change it):
@@ -89,7 +90,13 @@ C:\IT-Ops\tools\it-ops-console\alerts.ini, then run  python notify.py --test
 from that folder. Messages go out only when something is new, worse or
 cleared - plus one weekly summary. After that you never need the file again:
 change what you are told about on the console's Alerts tab, click "Save
-settings", and double-click "Apply Alert Settings" on your desktop.
+settings", and double-click "Apply Settings" on your desktop.
+
+Printers: you do not have to type every address. On the console's Print
+fleet tab, under "Where we look", name a subnet (10.0.10.0/24), a span
+(10.0.20.50-99) or a single address, Save settings, Apply Settings - and
+the next Refresh finds the printers on it. That is a scan of the addresses
+you name, so point it at your own VLANs.
 
 Everything against your tenant is read-only. Nothing stores a password.
 Setup locks the C:\IT-Ops folder to you and Administrators, so the data it

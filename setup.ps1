@@ -17,8 +17,8 @@
            "IT Ops Console"        opens the console in your browser
            "Refresh IT Ops Data"   runs every collector (you sign in), then
                                    rebuilds the console
-           "Apply Alert Settings"  applies alert settings you changed on the
-                                   console's Alerts tab
+           "Apply Settings"        applies what you changed on the console's
+                                   Alerts or Print fleet tab
       7. Ask how the console should stay fresh: you click Refresh yourself,
          it refreshes daily while you are signed in, or it refreshes daily
          unattended (a Global Administrator registers a read-only app once)
@@ -295,6 +295,8 @@ security_history  = history\security
 licensing_history = history\licensing
 # Refresh writes this each run: how it signed in, the schedule, certificate days left.
 refresh_status    = refresh-status.json
+# The printer collector writes this when config.ini names places to look.
+fleet_discovery   = fleet-discovery.json
 "@
 Set-Content -Path (Join-Path $consoleDir 'sources.ini') -Value $sources -Encoding UTF8
 Write-Host "  wrote $((Join-Path $consoleDir 'sources.ini'))"
@@ -332,18 +334,22 @@ if ($onWindows) {
     $lnk.Description = 'Run every collector (you sign in), then rebuild the console'
     $lnk.Save()
 
-    # The Alerts tab can only hand you your settings as text - a page cannot
-    # write into this folder. This icon is the other half: it takes what you
-    # copied and merges it into alerts.ini.
-    $applyPs1 = Join-Path $consoleDir 'apply-alerts.ps1'
+    # The console's pages can only hand you your settings as text - a page
+    # cannot write into this folder. This icon is the other half: it takes
+    # what you copied and puts each part where it belongs.
+    $applyPs1 = Join-Path $consoleDir 'apply-settings.ps1'
     if (Test-Path $applyPs1) {
-        $lnk = $shell.CreateShortcut((Join-Path $desktop 'Apply Alert Settings.lnk'))
+        $lnk = $shell.CreateShortcut((Join-Path $desktop 'Apply Settings.lnk'))
         $lnk.TargetPath = 'powershell.exe'
         $lnk.Arguments = "-NoProfile -NoExit -ExecutionPolicy Bypass -File `"$applyPs1`""
         $lnk.WorkingDirectory = $consoleDir
-        $lnk.Description = 'Apply the alert settings you saved on the console''s Alerts tab'
+        $lnk.Description = 'Apply the settings you saved on the console''s Alerts or Print fleet tab'
         $lnk.Save()
-        Write-Host '  created: "IT Ops Console", "Refresh IT Ops Data" and "Apply Alert Settings"'
+        # It used to be called "Apply Alert Settings", and now does both kinds -
+        # leaving the old icon behind would point at a script that is gone.
+        $oldLnk = Join-Path $desktop 'Apply Alert Settings.lnk'
+        if (Test-Path $oldLnk) { Remove-Item $oldLnk -Force -ErrorAction SilentlyContinue }
+        Write-Host '  created: "IT Ops Console", "Refresh IT Ops Data" and "Apply Settings"'
     } else {
         Write-Host '  created: "IT Ops Console" and "Refresh IT Ops Data"'
     }

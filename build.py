@@ -62,6 +62,8 @@ def main():
     models["security"] = model.security_model(feeds["security"], models["identity"])
     models["licensing"] = model.licensing_model(feeds["licensing"])
     models["fleet"] = model.fleet_model(feeds["fleet"])
+    # Where the printer collector looks, and what each place found.
+    models["discovery"] = model.discovery_model(feeds.get("fleet_discovery"))
     models["changes"] = model.changes_model(feeds["history"], feeds.get("run_summary"))
     # Posture over time: archived snapshots (run-all writes them) + the current
     # one. Optional feeds - without them the pages simply have no trend section.
@@ -130,7 +132,8 @@ def main():
                                                trend=models["trends"]["licensing"])),
         write_page(args.out, "fleet",
                          pages.build_fleet(models["fleet"], feeds["fleet"],
-                                           available, generated)),
+                                           available, generated,
+                                           discovery=models["discovery"])),
         write_page(args.out, "changes",
                          pages.build_changes(models["changes"], feeds["history"],
                                              available, generated)),

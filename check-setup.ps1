@@ -29,9 +29,12 @@ if (Test-Path $console) {
 } else { Gap "desktop shortcut 'IT Ops Console' is missing - re-run setup to recreate it" }
 if (Test-Path $refresh) { Say "desktop shortcut 'Refresh IT Ops Data' present" }
 else { Gap "desktop shortcut 'Refresh IT Ops Data' is missing - re-run setup to recreate it" }
-$applyLnk = Join-Path $desktop 'Apply Alert Settings.lnk'
-if (Test-Path $applyLnk) { Say "desktop shortcut 'Apply Alert Settings' present" }
-else { Note "desktop shortcut 'Apply Alert Settings' is missing - re-run setup to add it (you can still edit alerts.ini by hand)" }
+$applyLnk = Join-Path $desktop 'Apply Settings.lnk'
+if (Test-Path $applyLnk) { Say "desktop shortcut 'Apply Settings' present" }
+else { Note "desktop shortcut 'Apply Settings' is missing - re-run setup to add it (you can still edit alerts.ini and the printer config.ini by hand)" }
+if (Test-Path (Join-Path $desktop 'Apply Alert Settings.lnk')) {
+    Note "the old 'Apply Alert Settings' icon is still on your desktop - re-run setup to replace it with 'Apply Settings', which does both"
+}
 if (-not $root) { $root = 'C:\IT-Ops'; Note "assuming the install folder is $root" }
 
 # ---- layout ---- #

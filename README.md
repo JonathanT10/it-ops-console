@@ -63,7 +63,9 @@ into the license tool's folder — fill in the numbers and Refresh again.
 
 **Print fleet** — devices sorted worst-first, toner levels as severity-coloured
 meters, a page-volume sparkline per device, and anything that has not reported
-in 48 hours marked offline regardless of what its last snapshot said.
+in 48 hours marked offline regardless of what its last snapshot said. Plus
+**Where we look**: name a subnet, a span or a single address and the next
+refresh finds the printers on it for you — see *Finding printers* below.
 
 **What changed** — the console recomputes the diff from the archived snapshots
 rather than trusting a pre-baked list, so it stays correct even when the export
@@ -75,6 +77,34 @@ policies.
 right now with the same next-step line as the other pages, **every rule as a
 control you can change**, how `alerts.ini` was read (a line it could not use is
 listed, not silently ignored), and the last messages sent. See *Alerts* below.
+
+## Finding printers, instead of typing them
+
+Typing every printer's address gets old past a floor of them. On the **Print
+fleet** tab, name a place to look instead — a subnet (`10.0.10.0/24`), a span
+(`10.0.20.50-99`) or a single address — click **Save settings**, double-click
+**Apply Settings**, and the next refresh looks there. Anything that answers as
+a printer is added, named from its `sysName`, and polled from then on; a switch
+or a server that merely speaks SNMP is passed over rather than recorded. The
+tab then shows each place with how many addresses it covers, when it was last
+looked at and how many printers came back.
+
+The rows go into the printer collector's own `config.ini` under `[ranges]`, so
+the tool still works on its own; the console is just a nicer way to fill it in.
+Alongside them, **Look again every** (hours; 0 means only when you ask) and
+**Leave alone** (addresses to skip even if a look finds them).
+
+**It is a scan, and the page says so.** One SNMP request goes to every address
+in every place you name — ordinary traffic on a network you run, but on some
+networks it will show up in monitoring. Nothing is scanned until you name a
+place. A place larger than 1024 addresses is **refused rather than attempted**,
+and a place that cannot be read is reported by name on the tab and as an alert,
+because a typo that quietly finds nothing looks exactly like a range with
+nothing in it. Two alert rules come with it: *a new printer was found* (said
+once, so you know it worked) and *a place to look could not be scanned*.
+
+Polling now runs eight printers at a time, so a fleet that discovery grew does
+not spend one device's timeout after another.
 
 ## Posture over time
 
@@ -149,8 +179,9 @@ already points at everything else, and puts three shortcuts on your desktop:
   finish with one button to open the console. (`-NoStatusPage` for
   scheduled runs.)
 - **IT Ops Console** — opens the result in your browser.
-- **Apply Alert Settings** — applies whatever you changed on the console's
-  Alerts tab (see *Alerts* below). Only needed when you change something there.
+- **Apply Settings** — applies whatever you changed on the console's Alerts tab
+  (see *Alerts*) or Print fleet tab (see *Finding printers*). Only needed when
+  you change something there.
 
 ![Refresh progress](docs/refresh-status.png)
 
@@ -256,8 +287,8 @@ a collector failed, certificate expiring, data older than N days.
 **Changing the rules from the console.** The Alerts tab is the settings page:
 tick, untick, or type a new number, and the box at the bottom shows the exact
 settings your changes produce. **Save settings** copies that to the clipboard
-and drops a copy in your Downloads folder; then double-click **Apply Alert
-Settings** on your desktop and it lands.
+and drops a copy in your Downloads folder; then double-click **Apply Settings**
+on your desktop and it lands.
 
 Two steps rather than one, and deliberately so. The console is a folder of
 static HTML files — that is what lets you open it with no server running, and
@@ -269,7 +300,7 @@ URL is ever baked into a page, put on your clipboard, or left in Downloads.
 `[teams]` and `[email]` stay in `alerts.ini`, under the folder lock, edited by
 hand the once.
 
-`Apply Alert Settings` **merges** rather than overwrites: your comments, your
+`Apply Settings` **merges** rather than overwrites: your comments, your
 channel settings, and any line a newer version of the console wrote are all left
 alone, and only the settings you changed move. It keeps the previous file as
 `alerts.ini.bak`, writes nothing at all if the result would not read back
