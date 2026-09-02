@@ -880,17 +880,35 @@ def test_alerts_page():
     avail = {"index": True, "alerts": True}
     html = pages.build_alerts(am, avail, "now")
     check("alerts page: renders the four sections",
-          all(h in html for h in ("Where alerts go", "Firing now", "What is watched", "alerts.ini")))
+          all(h in html for h in ("Where alerts go", "Firing now", "Change what you are told about", "alerts.ini")))
     check("alerts page: says Teams is connected and when messages go",
           "connected - a Workflows URL is set" in html and "only when an alert appears, gets worse, or clears" in html)
     check("alerts page: shows the last message and history", "2026-08-31 07:01 UTC" in html and "weekly summary: 12 open" in html)
     check("alerts page: firing rows carry severity badge, title and next step",
           'class="badge" style="color:var(--critical)"' in html and "Admin without MFA:" in html
           and "aka.ms/mfasetup" in html)
-    check("alerts page: rules table lists every rule with its setting",
-          all(esc_label in html for esc_label in ("An admin has no MFA", "MFA coverage falls below", "90%", "25 seats"))
-          and html.count('class="rules"') == len(A.TABS))
-    check("alerts page: off rules shown muted", 'class="set off">off' in html)
+    check("alerts page: every rule is a control, one table per tab",
+          all(lbl in html for lbl in ("An admin has no MFA", "MFA coverage falls below"))
+          and html.count('class="rules"') == len(A.TABS)
+          and html.count('data-kind="switch"') == sum(1 for r in A.CATALOG if r.kind == "switch") + len(A.TABS)
+          and html.count('data-kind="number"') == sum(1 for r in A.CATALOG if r.kind == "number"))
+    check("alerts page: an on rule is ticked, an off rule is not",
+          'data-key="admin_without_mfa" data-kind="switch" checked' in html
+          and 'data-key="ca_gap_warning" data-kind="switch">' in html)
+    check("alerts page: a threshold carries its number and unit",
+          'data-key="mfa_coverage_below" data-kind="number" min="0" step="1" value="90"' in html
+          and 'data-key="unused_seats_above" data-kind="number" min="0" step="1" value="25"' in html)
+    check("alerts page: the send settings are controls too",
+          'data-key="when" data-kind="radio" value="changes" checked' in html
+          and 'data-key="digest_day"' in html and 'data-key="console_link"' in html)
+    check("alerts page: a save box and the two-step instruction",
+          'id="settings-text"' in html and 'id="save-btn"' in html
+          and "Apply Alert Settings" in html and "<noscript>" in html)
+    # console-site is a folder people copy onto shares, so the page must never
+    # carry the Workflows URL - and the editor must not offer to change it.
+    check("alerts page: the editor never carries where alerts go",
+          "EXAMPLE-not-a-real-url" not in html and 'data-sec="teams"' not in html
+          and 'data-sec="email"' not in html and 'data-key="webhook"' not in html)
     check("alerts page: no setup banner when a channel exists", "not sent anywhere yet" not in html)
 
     none = A.load_config(os.path.join(here, "nope-alerts.ini"))
@@ -905,12 +923,17 @@ def test_alerts_page():
     am3 = pages.alerts_page_model([], bad, None, A.channels_configured(bad, env={}))
     html3 = pages.build_alerts(am3, avail, "now")
     check("alerts page: unusable lines listed", "could not be used as written" in html3 and "&#x27;typo&#x27;" in html3)
-    check("alerts page: silenced tab labelled", "this tab is silenced" in html3)
+    check("alerts page: a silenced tab shows an unticked tab box",
+          'data-sec="fleet" data-key="notify" data-kind="switch">' in html3
+          and 'data-sec="security" data-key="notify" data-kind="switch" checked' in html3)
     check("alerts page: nothing firing says so calmly", "Nothing - every rule that is on is quiet." in html3)
     hostile = [{"key": "k", "tab": "security", "rule": "admin_without_mfa", "severity": "critical",
                 "title": "<script>alert(1)</script>", "detail": "<b>x</b>", "action": "", "transient": False}]
     am4 = pages.alerts_page_model(hostile, none, None, A.channels_configured(none, env={}))
-    check("alerts page: alert text escaped", "<script>" not in pages.build_alerts(am4, avail, "now"))
+    h4 = pages.build_alerts(am4, avail, "now")
+    check("alerts page: alert text escaped",
+          "<script>alert(1)</script>" not in h4 and "&lt;script&gt;alert(1)" in h4
+          and h4.count("<script>") == 1)   # only the editor's own
 
 
 def _all_pages(models, feeds, available):
