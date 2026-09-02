@@ -292,10 +292,11 @@ def test_next_steps():
         "RoleSummary": [], "StaleMembers": [], "Guests": {"Total": 0},
         "LegacyAuth": {"Available": False}, "NeedsAttention": []}, ts=NOW)
     secm = model.security_model(sec, ident)
-    ov = pages.build_overview(
-        {"identity": ident, "security": secm, "licensing": None, "fleet": None, "changes": None},
-        {"tenant": tenant, "security": sec, "licensing": sec, "history": sec, "fleet": sec},
-        avail, gen)
+    ovm = {"identity": ident, "security": secm, "licensing": None, "fleet": None, "changes": None}
+    ovf = {"tenant": tenant, "security": sec, "licensing": sec, "history": sec, "fleet": sec}
+    # The overview list is the alert rules now, so it needs their verdict.
+    ovm["fired"] = A.evaluate(A.default_config(), ovm, ovf, now=NOW)
+    ov = pages.build_overview(ovm, ovf, avail, gen)
     check("next_step: overview items carry an action line", 'class="act"' in ov)
     check("next_step: overview admin-without-MFA carries the MFA action",
           "aka.ms/mfasetup" in ov)
@@ -696,7 +697,7 @@ def test_alerts_catalog_and_config(tmp):
     check("alerts: every rule has label, help and a known severity",
           all(r.label and r.help and r.severity in A.SEVERITIES for r in A.CATALOG))
     check("alerts: defaults come through", cfg["rules"]["security.mfa_coverage_below"] == 90
-          and cfg["rules"]["identity.ca_gap_warning"] is False and cfg["send"]["when"] == "changes")
+          and cfg["rules"]["changes.app_registrations"] is False and cfg["send"]["when"] == "changes")
 
     missing = A.load_config(os.path.join(tmp, "nope.ini"))
     check("alerts: a missing ini is all defaults and not configured",
@@ -757,8 +758,9 @@ def test_alerts_rules():
           len(exp) == 1 and exp[0]["severity"] == "critical" and "HR Sync" in exp[0]["title"])
     soon = _by_rule(fired, "app_credential_expiring_days")
     check("rules: expiring credential says how many days", len(soon) == 1 and "expires in 16 days" in soon[0]["title"])
-    check("rules: CA gaps: critical none, warning off by default",
-          not _by_rule(fired, "ca_gap_critical") and not _by_rule(fired, "ca_gap_warning"))
+    check("rules: no critical CA gap in the sample; both warning gaps are found",
+          not _by_rule(fired, "ca_gap_critical") and len(_by_rule(fired, "ca_gap_warning")) == 2
+          and all(a["action"] for a in _by_rule(fired, "ca_gap_warning")))
     check("rules: unused seats 26 > 25 fires", len(_by_rule(fired, "unused_seats_above")) == 1)
     check("rules: disabled licensed holder fires with the cost",
           len(_by_rule(fired, "disabled_account_licensed")) == 1
@@ -779,15 +781,14 @@ def test_alerts_rules():
 
     # Turning knobs changes what fires, and a silenced tab fires nothing.
     cfg2 = A.load_config(os.path.join(here, "alerts.example.ini"))
-    cfg2["rules"]["identity.ca_gap_warning"] = True
+    cfg2["rules"]["identity.ca_gap_warning"] = False
     cfg2["rules"]["licensing.unused_seats_above"] = 30
     cfg2["rules"]["fleet.supply_below_percent"] = 5.5
     cfg2["rules"]["security.mfa_coverage_below"] = 95
     cfg2["rules"]["licensing.unused_monthly_cost_above"] = 100
     cfg2["tabs"]["fleet"]["notify"] = False
     f2 = A.evaluate(cfg2, models, feeds, now=now)
-    check("rules: warning CA gaps on -> two", len(_by_rule(f2, "ca_gap_warning")) == 2
-          and all(a["action"] for a in _by_rule(f2, "ca_gap_warning")))
+    check("rules: warning CA gaps off -> none", not _by_rule(f2, "ca_gap_warning"))
     check("rules: raising the seats line silences it", not _by_rule(f2, "unused_seats_above"))
     check("rules: MFA line at 95 fires with the numbers",
           len(_by_rule(f2, "mfa_coverage_below")) == 1 and "93.4%" in _by_rule(f2, "mfa_coverage_below")[0]["title"]
@@ -840,6 +841,90 @@ def test_alerts_rules():
     check("rules: certificate rule at 0 is off entirely", not _by_rule(f6, "certificate_expiring_days"))
 
 
+def test_overview_panel():
+    """The overview's Needs-a-human list IS the alert rules - one source of truth."""
+    models, feeds = _sample_models()
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = A.load_config(os.path.join(here, "alerts.example.ini"))
+    now = parse_ts("2026-09-02T12:00:00Z")
+    avail = {"index": True, "identity": True, "security": True, "licensing": True,
+             "fleet": True, "changes": True, "alerts": True}
+
+    def panel(config, extra_models=None):
+        m = dict(models)
+        m.update(extra_models or {})
+        m["fired"] = A.evaluate(config, m, feeds, now=now)
+        html = pages.build_overview(m, feeds, avail, "now")
+        chunk = html[html.index("Needs a human"):html.index("Stale data")] if "Stale data" in html \
+            else html[html.index("Needs a human"):]
+        return html, chunk
+
+    html, chunk = panel(cfg)
+    check("panel: it is built from the alerts, not a second hand-written list",
+          not hasattr(pages, "urge") and "The same things the console would tell you about" in chunk)
+    check("panel: severity order - the critical rows come first",
+          chunk.index("Printer error: Service Bay") < chunk.index("Printer offline: Warehouse"))
+    check("panel: findings only the catalog knows about now appear",
+          all(t in chunk for t in ("Expired app credential: HR Sync",
+                                   "Legacy authentication is still in use",
+                                   "26 paid seats are unassigned")))
+    check("panel: everything the old hand-written list showed is still there",
+          all(t in chunk for t in ("Admin without MFA: Directory Sync Service Account",
+                                   "Printer error: Service Bay", "Printer offline: Warehouse",
+                                   "CA gap: Break-glass accounts excluded",
+                                   "CA gap: No lingering report-only policies",
+                                   "Disabled account still licensed: Ellis Frank")))
+    check("panel: each row carries the same next step as its page",
+          "aka.ms/mfasetup" in chunk and pages.next_step("disabled-licensed")[:40] in chunk)
+    check("panel: it points at where to change what counts", 'href="alerts.html">Alerts</a>' in chunk)
+    check("panel: informational findings stay on their own page (toner is not here)",
+          "Toner" not in chunk and "Magenta" not in chunk)
+    check("panel: the refresh's own troubles are not duplicated here",
+          "could not sign in" not in chunk and "automatic-refresh certificate" not in chunk
+          and "did not complete" not in chunk and "data is" not in chunk)
+
+    # turning a rule off takes it off the front page too - the whole point
+    off = A.load_config(os.path.join(here, "alerts.example.ini"))
+    off["rules"]["security.admin_without_mfa"] = False
+    _h, chunk_off = panel(off)
+    check("panel: a rule turned off leaves the panel",
+          "Admin without MFA" not in chunk_off and "Printer error: Service Bay" in chunk_off)
+    quiet = A.load_config(os.path.join(here, "alerts.example.ini"))
+    quiet["tabs"]["fleet"]["notify"] = False
+    _h, chunk_quiet = panel(quiet)
+    check("panel: a silenced tab leaves the panel", "Printer" not in chunk_quiet)
+    moved = A.load_config(os.path.join(here, "alerts.example.ini"))
+    moved["rules"]["licensing.unused_seats_above"] = 40
+    _h, chunk_moved = panel(moved)
+    check("panel: moving a threshold moves the panel", "paid seats are unassigned" not in chunk_moved)
+
+    # change events are history, not open items
+    ch = dict(models)
+    ch["changes"] = {"events": [{"ts": "2026-09-01T09:00:00Z", "category": "Role assignments",
+                                 "kind": "added", "item": "Pat Admin", "detail": "Global Administrator"}],
+                     "snapshot_count": 2, "first": None, "last": None}
+    _h, chunk_ch = panel(cfg, ch)
+    check("panel: a change event is not an open item", "Pat Admin" not in chunk_ch)
+
+    # one noisy rule cannot crowd out the rest
+    many = dict(models)
+    many["security"] = dict(models["security"], admins_without_mfa=[
+        {"DisplayName": "Admin %d" % i, "UserPrincipalName": "a%d@x" % i, "Roles": "Global Administrator"}
+        for i in range(9)])
+    _h, chunk_many = panel(cfg, many)
+    check("panel: at most five rows from one rule, then a pointer to its page",
+          chunk_many.count("Admin without MFA:") == 5
+          and '+4 more like this on the <a href="security.html">Security page</a>' in chunk_many)
+    check("panel: the pointer sits under the last row of its own rule",
+          chunk_many.index("+4 more like this") > chunk_many.index("Admin without MFA: Admin 4")
+          and chunk_many.index("+4 more like this") < chunk_many.index("Printer offline"))
+
+    empty = dict(models)
+    empty["fired"] = []
+    check("panel: nothing firing means no panel at all",
+          "Needs a human" not in pages.build_overview(empty, feeds, avail, "now"))
+
+
 def test_alerts_state():
     a1 = {"key": "security/admin_without_mfa/a@x", "tab": "security", "rule": "admin_without_mfa", "severity": "critical", "title": "A", "detail": "", "action": "", "transient": False}
     a2 = {"key": "fleet/device_offline/10.0.0.1", "tab": "fleet", "rule": "device_offline", "severity": "warning", "title": "B", "detail": "", "action": "", "transient": False}
@@ -880,7 +965,7 @@ def test_alerts_page():
     avail = {"index": True, "alerts": True}
     html = pages.build_alerts(am, avail, "now")
     check("alerts page: renders the four sections",
-          all(h in html for h in ("Where alerts go", "Firing now", "Change what you are told about", "alerts.ini")))
+          all(h in html for h in ("Where alerts go", "Firing now", "Change what the console flags", "alerts.ini")))
     check("alerts page: says Teams is connected and when messages go",
           "connected - a Workflows URL is set" in html and "only when an alert appears, gets worse, or clears" in html)
     check("alerts page: shows the last message and history", "2026-08-31 07:01 UTC" in html and "weekly summary: 12 open" in html)
@@ -894,7 +979,7 @@ def test_alerts_page():
           and html.count('data-kind="number"') == sum(1 for r in A.CATALOG if r.kind == "number"))
     check("alerts page: an on rule is ticked, an off rule is not",
           'data-key="admin_without_mfa" data-kind="switch" checked' in html
-          and 'data-key="ca_gap_warning" data-kind="switch">' in html)
+          and 'data-key="app_registrations" data-kind="switch">' in html)
     check("alerts page: a threshold carries its number and unit",
           'data-key="mfa_coverage_below" data-kind="number" min="0" step="1" value="90"' in html
           and 'data-key="unused_seats_above" data-kind="number" min="0" step="1" value="25"' in html)
@@ -1056,6 +1141,7 @@ def main():
         test_refresh_render()
         test_alerts_catalog_and_config(tmp)
         test_alerts_rules()
+        test_overview_panel()
         test_alerts_state()
         test_alerts_page()
         test_render_empty_console()
