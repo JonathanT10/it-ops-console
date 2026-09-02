@@ -62,6 +62,11 @@ def main():
     # one. Optional feeds - without them the pages simply have no trend section.
     models["trends"] = model.trends_model(feeds.get("security_history"), feeds["security"],
                                           feeds.get("licensing_history"), feeds["licensing"])
+    # How this machine keeps itself fresh (run-all writes refresh-status.json).
+    # One footer sentence on every page; a banner on the overview only when a
+    # person must act. Older installs have no such file and get neither.
+    models["refresh"] = model.refresh_model(feeds.get("refresh_status"))
+    render.REFRESH_NOTE = models["refresh"]["note"] if models["refresh"] else ""
 
     available = {
         "index": True,

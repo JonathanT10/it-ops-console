@@ -61,6 +61,23 @@
     Skip the up-front Connect-MgGraph - use when you are already connected, or
     when running app-only with a certificate you connect with yourself.
 
+.PARAMETER Scheduled
+    This run was started by the automatic-refresh task, not by a person. The
+    sign-in then happens from a short-lived child process with a time limit, so
+    a sign-in window nobody is there to finish cannot hang the run: when the
+    limit passes the run carries on without Microsoft 365 data, records why,
+    and the console shows one plain sentence about it.
+
+.PARAMETER RefreshConfig
+    The automatic-refresh.ini setup writes (schedule mode, whether to stay
+    signed in between runs, and the registered app + certificate for
+    unattended runs). Defaults to the file beside this script; a missing file
+    means "no automatic refresh", which is how a desktop click behaves.
+
+.PARAMETER SignInTimeoutSeconds
+    How long a scheduled run waits for a sign-in window to be finished before
+    giving up on Microsoft 365 for this run. Default 300 (5 minutes).
+
 .EXAMPLE
     .\run-all.ps1 -OutputRoot C:\it-ops\output -SitePath C:\inetpub\console
 
@@ -88,7 +105,10 @@ param(
     [switch]$SkipLicensing,
     [switch]$SkipFleet,
     [switch]$NoConnect,
-    [switch]$NoStatusPage
+    [switch]$NoStatusPage,
+    [switch]$Scheduled,
+    [string]$RefreshConfig,
+    [ValidateRange(30, 3600)][int]$SignInTimeoutSeconds = 300
 )
 
 $ErrorActionPreference = 'Stop'
@@ -98,8 +118,9 @@ $ErrorActionPreference = 'Stop'
 # paging ENDS), which strict mode turns from "null" into a terminating error.
 # A wrapper must not alter the behaviour of the things it wraps.
 
-if (-not $ToolRoot)   { $ToolRoot   = Split-Path -Parent $PSScriptRoot }
-if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'sources.ini' }
+if (-not $ToolRoot)      { $ToolRoot      = Split-Path -Parent $PSScriptRoot }
+if (-not $ConfigPath)    { $ConfigPath    = Join-Path $PSScriptRoot 'sources.ini' }
+if (-not $RefreshConfig) { $RefreshConfig = Join-Path $PSScriptRoot 'automatic-refresh.ini' }
 
 $results = [System.Collections.Generic.List[object]]::new()
 
@@ -118,6 +139,9 @@ function Get-PlainWords {
     if ($Step -eq 'console build') {
         return 'The console pages could not be rebuilt, so the site still shows the previous data. If this keeps happening, check that Python 3 is installed.'
     }
+    # The sign-in step composes its own plain sentence as it goes (which route
+    # it tried, why each was passed over) - pass that through untouched.
+    if ($Step -eq 'sign-in') { return $Detail }
     switch -Wildcard ($Detail) {
         '*AADSTS*'                       { return 'The sign-in did not complete. Run this again and finish the sign-in window.' }
         '*Authentication needed*'        { return 'You were not signed in. Run this again and finish the sign-in window.' }
@@ -239,9 +263,15 @@ function Invoke-Step {
         [string]$ScriptPath,
         [hashtable]$Arguments,
         [switch]$Skip,
+        [string]$SkipReason,
         [string]$StepKey
     )
-    if ($Skip) { Add-Result $Name 'skipped'; Set-StepState $StepKey 'skipped'; return }
+    if ($Skip) {
+        Add-Result $Name 'skipped' $SkipReason
+        if ($SkipReason) { Set-StepState $StepKey 'skipped' -Detail "Skipped - $SkipReason" }
+        else { Set-StepState $StepKey 'skipped' }
+        return
+    }
     if (-not (Test-Path -LiteralPath $ScriptPath)) {
         Add-Result $Name 'missing' "not found: $ScriptPath"
         Set-StepState $StepKey 'missing' -Plain (Get-PlainWords $Name "not found: $ScriptPath")
@@ -355,11 +385,133 @@ if (-not $NoStatusPage) {
 
 $needGraph = -not ($SkipTenantDocs -and $SkipSecurity -and $SkipLicensing)
 
-if (-not ($needGraph -and -not $NoConnect)) {
-    Set-StepState 'signin' 'skipped' -Detail 'Already signed in, or nothing to collect'
+# ---- what setup decided for this machine (automatic-refresh.ini) ---------- #
+function Read-IniFile {
+    <# Tiny INI reader: sections -> keys -> trimmed values. Comments start with
+       ; or #. A missing file is an empty config, never an error. #>
+    param([string]$Path)
+    $ini = @{}
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $ini }
+    $section = ''
+    foreach ($raw in Get-Content -LiteralPath $Path -Encoding UTF8) {
+        $line = $raw.Trim()
+        if (-not $line -or $line[0] -in ';', '#') { continue }
+        if ($line -match '^\[(.+)\]$') { $section = $matches[1].Trim().ToLowerInvariant(); if (-not $ini.ContainsKey($section)) { $ini[$section] = @{} }; continue }
+        $eq = $line.IndexOf('=')
+        if ($eq -lt 1) { continue }
+        $key = $line.Substring(0, $eq).Trim().ToLowerInvariant()
+        $val = $line.Substring($eq + 1)
+        $c = $val.IndexOf(' ;'); if ($c -ge 0) { $val = $val.Substring(0, $c) }
+        $c = $val.IndexOf(' #'); if ($c -ge 0) { $val = $val.Substring(0, $c) }
+        if (-not $ini.ContainsKey($section)) { $ini[$section] = @{} }
+        $ini[$section][$key] = $val.Trim()
+    }
+    return $ini
 }
+function Get-IniValue {
+    param($Ini, [string]$Section, [string]$Key, [string]$Default = '')
+    if ($Ini.ContainsKey($Section) -and $Ini[$Section].ContainsKey($Key) -and $Ini[$Section][$Key]) { return $Ini[$Section][$Key] }
+    return $Default
+}
+
+function Get-RefreshCertificateInfo {
+    <# The registered-app route needs three things from the ini (tenant, app,
+       certificate thumbprint) and the certificate itself in this computer's
+       store. Report what is there and how long the certificate has left, so
+       the run - and the console - can say "expires in 12 days" before it
+       silently stops working. #>
+    param($Ini)
+    $info = @{ Configured = $false; TenantId = ''; ClientId = ''; Thumbprint = ''; Present = $false; Expires = $null; DaysLeft = $null; Expired = $false }
+    $info.Thumbprint = (Get-IniValue $Ini 'signin' 'certificate_thumbprint') -replace '\s', ''
+    $info.TenantId   = Get-IniValue $Ini 'signin' 'tenant_id'
+    $info.ClientId   = Get-IniValue $Ini 'signin' 'client_id'
+    if (-not ($info.Thumbprint -and $info.TenantId -and $info.ClientId)) { return $info }
+    $info.Configured = $true
+    $cert = $null
+    foreach ($store in 'Cert:\LocalMachine\My', 'Cert:\CurrentUser\My') {
+        try { $cert = Get-Item "$store\$($info.Thumbprint)" -ErrorAction Stop; if ($cert) { break } } catch { $cert = $null }
+    }
+    if ($cert) {
+        $info.Present = $true
+        $info.Expires = [datetime]$cert.NotAfter
+    } else {
+        # Not in the store (or no store on this OS): fall back to the expiry
+        # setup recorded, so the words about it are still right.
+        $recorded = Get-IniValue $Ini 'signin' 'certificate_expires'
+        if ($recorded) { try { $info.Expires = [datetime]::ParseExact($recorded, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) } catch { } }
+    }
+    if ($info.Expires) {
+        $info.DaysLeft = [int][math]::Floor(($info.Expires - (Get-Date)).TotalDays)
+        $info.Expired = $info.DaysLeft -lt 0
+    }
+    return $info
+}
+
+function Invoke-SignInProbe {
+    <# A scheduled run signs in from a short-lived child PowerShell with a time
+       limit. If the saved sign-in is still good the child finishes in seconds
+       and leaves the token in the per-user cache, so this process's own
+       Connect-MgGraph then completes without a window. If a window IS needed
+       and nobody finishes it in time, the child is killed and the run carries
+       on without Microsoft 365 - a plain sentence about it instead of a hang. #>
+    param([string[]]$Scopes, [int]$TimeoutSeconds)
+    $onWin = ($env:OS -eq 'Windows_NT')
+    $engine = if ($onWin) { 'powershell.exe' } else { 'pwsh' }
+    $scopeList = ($Scopes | ForEach-Object { "'$_'" }) -join ','
+    $code = "Import-Module Microsoft.Graph.Authentication -ErrorAction Stop; " +
+            "Connect-MgGraph -Scopes @($scopeList) -NoWelcome -ErrorAction Stop; " +
+            "if (Get-MgContext) { exit 0 } else { exit 3 }"
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+    $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc)
+    if ($onWin) { $psArgs = @('-WindowStyle', 'Hidden') + $psArgs }
+    $minutes = [math]::Max(1, [int][math]::Round($TimeoutSeconds / 60))
+    try {
+        $p = Start-Process -FilePath $engine -ArgumentList $psArgs -PassThru
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $p.Kill() } catch { }
+            return @{ Ok = $false; Detail = "Nobody finished the Microsoft sign-in window within $minutes minute$(if ($minutes -ne 1) { 's' })." }
+        }
+        if ($p.ExitCode -eq 0) { return @{ Ok = $true; Detail = '' } }
+        return @{ Ok = $false; Detail = "The Microsoft sign-in did not complete (exit code $($p.ExitCode))." }
+    } catch {
+        return @{ Ok = $false; Detail = "Could not start the Microsoft sign-in ($($_.Exception.Message))." }
+    }
+}
+
+$refreshIni   = Read-IniFile $RefreshConfig
+$schedMode    = (Get-IniValue $refreshIni 'schedule' 'mode' 'off').ToLowerInvariant()
+$schedTime    = Get-IniValue $refreshIni 'schedule' 'time'
+$schedRunAs   = Get-IniValue $refreshIni 'schedule' 'run_as'
+# Staying signed in between runs is a choice a person made in setup, and only
+# for the "while I'm signed in" schedule. Anything else signs out at the end,
+# exactly as before.
+$keepSignedIn = ($schedMode -eq 'while-signed-in') -and
+                ((Get-IniValue $refreshIni 'signin' 'keep_signed_in' 'no') -match '^(yes|true|1)$')
+$certInfo     = Get-RefreshCertificateInfo $refreshIni
+
+# ---- the sign-in ladder --------------------------------------------------- #
+# 1. the registered app + this computer's certificate (unattended schedule)
+# 2. the saved sign-in, silently (a person set up "while I'm signed in")
+# 3. a sign-in window - with a time limit when nobody may be there
+# 4. stop cleanly: no Microsoft 365 data this run, one plain sentence why
+# A rung that is passed over is REPORTED, not hidden - an expired certificate
+# must not be papered over by a sign-in that happened to still work.
 $script:GraphConnectedByUs = $false
-if ($needGraph -and -not $NoConnect) {
+$script:SignIn = [ordered]@{ Mode = 'none'; Ok = $true; Detail = ''; Dropped = @() }
+function Drop-SignInRung {
+    param([string]$Why)
+    $script:SignIn.Dropped = @($script:SignIn.Dropped) + $Why
+    Write-Warning $Why
+    Add-StatusLine 'signin' $Why
+}
+
+if (-not $needGraph) {
+    Set-StepState 'signin' 'skipped' -Detail 'Nothing to collect from Microsoft 365 this run'
+    $script:SignIn.Mode = 'not-needed'
+} elseif ($NoConnect) {
+    Set-StepState 'signin' 'skipped' -Detail 'Using the session you already opened'
+    $script:SignIn.Mode = 'existing'
+} else {
     Set-StepState 'signin' 'running'
     $scopes = @(
         'Directory.Read.All'
@@ -374,24 +526,129 @@ if ($needGraph -and -not $NoConnect) {
         'DeviceManagementApps.Read.All'
     )
     if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
-        throw "Microsoft.Graph.Authentication is not installed. Run: Install-Module Microsoft.Graph -Scope CurrentUser"
-    }
-    Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
-    $ctx = Get-MgContext
-    if (-not $ctx) {
-        Write-Host 'Connecting to Microsoft Graph (read-only scopes)...'
-        Add-StatusLine 'signin' 'A Microsoft sign-in window is open - finish signing in there.'
-        Connect-MgGraph -Scopes $scopes -NoWelcome
-        $script:GraphConnectedByUs = $true
+        $script:SignIn.Detail = 'The Microsoft Graph PowerShell module is not installed for this account. Re-run setup, or: Install-Module Microsoft.Graph.Authentication -Scope CurrentUser'
     } else {
-        Write-Host "Already connected as $($ctx.Account) - reusing that session."
-        $missing = @($scopes | Where-Object { $_ -notin $ctx.Scopes })
-        if ($missing.Count) {
-            Write-Warning ("Current session is missing: {0}" -f ($missing -join ', '))
-            Write-Warning 'Some sections may come back empty. Disconnect-MgGraph and re-run to get all scopes.'
+        Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+        $ctx = Get-MgContext
+        if ($ctx) {
+            $who = if ($ctx.Account) { $ctx.Account } elseif ($ctx.ClientId) { "app $($ctx.ClientId)" } else { 'an existing session' }
+            Write-Host "Already connected as $who - reusing that session."
+            $missing = @($scopes | Where-Object { $_ -notin @($ctx.Scopes) })
+            if ($missing.Count) {
+                Write-Warning ("Current session is missing: {0}" -f ($missing -join ', '))
+                Write-Warning 'Some sections may come back empty. Disconnect-MgGraph and re-run to get all scopes.'
+            }
+            $script:SignIn.Mode = 'existing'
+        }
+
+        # Rung 1: the registered app, when this machine was set up for unattended runs.
+        if ($script:SignIn.Mode -eq 'none' -and $schedMode -eq 'unattended') {
+            if (-not $certInfo.Configured) {
+                Drop-SignInRung 'Automatic refresh is set to run unattended, but the registered app or its certificate is missing from automatic-refresh.ini - re-run setup to finish that step.'
+            } elseif ($certInfo.Expired) {
+                Drop-SignInRung ("The automatic-refresh certificate expired on {0} - re-run setup to make a new one and upload it." -f $certInfo.Expires.ToString('yyyy-MM-dd'))
+            } elseif (-not $certInfo.Present) {
+                Drop-SignInRung "The automatic-refresh certificate ($($certInfo.Thumbprint)) is not in this computer's certificate store, or this account cannot use it."
+            } else {
+                Write-Host 'Connecting to Microsoft Graph as the registered app (read-only)...'
+                Add-StatusLine 'signin' 'Signing in as the registered app - no window needed.'
+                try {
+                    Connect-MgGraph -ClientId $certInfo.ClientId -TenantId $certInfo.TenantId `
+                        -CertificateThumbprint $certInfo.Thumbprint -NoWelcome -ErrorAction Stop
+                    $script:GraphConnectedByUs = $true
+                    $script:SignIn.Mode = 'app'
+                } catch {
+                    Drop-SignInRung "Signing in as the registered app failed: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        # Rungs 2 and 3: as a person - silently from the saved sign-in when there
+        # is one, otherwise a window. A scheduled run puts a time limit on it.
+        if ($script:SignIn.Mode -eq 'none') {
+            if ($Scheduled) {
+                Write-Host 'Signing in to Microsoft Graph from the saved sign-in (read-only scopes)...'
+                Add-StatusLine 'signin' 'Signing in from the saved sign-in - a window opens only if that has expired.'
+                $probe = Invoke-SignInProbe -Scopes $scopes -TimeoutSeconds $SignInTimeoutSeconds
+                if ($probe.Ok) {
+                    try {
+                        Connect-MgGraph -Scopes $scopes -NoWelcome -ErrorAction Stop
+                        $script:GraphConnectedByUs = $true
+                        $script:SignIn.Mode = 'user'
+                    } catch { Drop-SignInRung "The sign-in did not complete: $($_.Exception.Message)" }
+                } else {
+                    Drop-SignInRung $probe.Detail
+                }
+            } else {
+                Write-Host 'Connecting to Microsoft Graph (read-only scopes)...'
+                Add-StatusLine 'signin' 'A Microsoft sign-in window is open - finish signing in there.'
+                try {
+                    Connect-MgGraph -Scopes $scopes -NoWelcome -ErrorAction Stop
+                    $script:GraphConnectedByUs = $true
+                    $script:SignIn.Mode = 'user'
+                } catch { Drop-SignInRung "The sign-in did not complete: $($_.Exception.Message)" }
+            }
         }
     }
-    Set-StepState 'signin' 'ok' -Detail 'Signed in with read-only access'
+
+    if ($script:SignIn.Mode -eq 'none') {
+        # Rung 4: stop cleanly. The Microsoft 365 steps are skipped below, the
+        # printers and the console build still run, and the exit code says red.
+        $script:SignIn.Ok = $false
+        $whatNow = 'This refresh ran without Microsoft 365 data. Double-click "Refresh IT Ops Data" to sign in and collect it.'
+        if (-not $script:SignIn.Detail) {
+            $script:SignIn.Detail = ((@($script:SignIn.Dropped) -join ' ') + ' ' + $whatNow).Trim()
+        } else {
+            Write-Warning $script:SignIn.Detail     # a reason no rung reported (module missing)
+            $script:SignIn.Detail = "$($script:SignIn.Detail) $whatNow"
+        }
+        Add-Result 'sign-in' 'FAILED' $script:SignIn.Detail
+        Set-StepState 'signin' 'failed' -Plain $script:SignIn.Detail
+        # The reasons were already warned about as each rung was passed over;
+        # what is new here is what happens next.
+        Write-Warning $whatNow
+    } else {
+        $how = switch ($script:SignIn.Mode) {
+            'app'      { 'Signed in as the registered app (read-only)' }
+            'existing' { 'Using the session already open (read-only)' }
+            default    { 'Signed in with read-only access' }
+        }
+        $script:SignIn.Detail = $how
+        Set-StepState 'signin' 'ok' -Detail $how
+    }
+}
+$signedIn = $script:SignIn.Mode -ne 'none'
+$notSignedIn = if ($signedIn) { $null } else { 'not signed in' }
+
+function Write-RefreshStatus {
+    <# One small JSON the console (and check-setup) read: how the last refresh
+       signed in, what was passed over, the schedule this machine is on, and
+       how long the certificate has left. Written before the console build so
+       the pages reflect THIS run, and again at the end with the outcome. #>
+    param([bool]$Final, [bool]$Ok, [string[]]$Summary = @())
+    $status = [ordered]@{
+        GeneratedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        Scheduled    = [bool]$Scheduled
+        Final        = $Final
+        Ok           = $Ok
+        Message      = (@($Summary) -join ' ')
+        SignIn       = [ordered]@{ Mode = $script:SignIn.Mode; Ok = $script:SignIn.Ok; Detail = $script:SignIn.Detail; Dropped = @($script:SignIn.Dropped) }
+        Steps        = @($results.ToArray() | ForEach-Object { [ordered]@{ Step = $_.Step; Status = $_.Status; Detail = $_.Detail } })
+        Schedule     = [ordered]@{ Mode = $schedMode; Time = $schedTime; RunAs = $schedRunAs }
+        KeepSignedIn = [bool]$keepSignedIn
+        Certificate  = $null
+    }
+    if ($certInfo.Configured) {
+        $status.Certificate = [ordered]@{
+            Thumbprint = $certInfo.Thumbprint
+            Present    = [bool]$certInfo.Present
+            Expires    = if ($certInfo.Expires) { $certInfo.Expires.ToString('yyyy-MM-dd') } else { $null }
+            DaysLeft   = $certInfo.DaysLeft
+        }
+    }
+    try {
+        $status | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $OutputRoot 'refresh-status.json') -Encoding UTF8
+    } catch { Write-Warning "Could not write refresh-status.json ($($_.Exception.Message))." }
 }
 
 $null = New-Item -ItemType Directory -Path $OutputRoot -Force
@@ -400,12 +657,14 @@ $null = New-Item -ItemType Directory -Path $OutputRoot -Force
 # Collectors
 # --------------------------------------------------------------------------- #
 
-Invoke-Step -Name 'entra-tenant-docs' -Skip:$SkipTenantDocs -StepKey 'tenant' `
+Invoke-Step -Name 'entra-tenant-docs' -Skip:($SkipTenantDocs -or -not $signedIn) -StepKey 'tenant' `
+    -SkipReason $(if ($SkipTenantDocs) { '' } else { $notSignedIn }) `
     -ScriptPath (Join-Path $ToolRoot 'entra-tenant-docs\Export-EntraTenantDocs.ps1') `
     -Arguments @{ OutputPath = (Join-Path $OutputRoot 'tenant-docs') }
 Update-StatsFromOutputs
 
-Invoke-Step -Name 'entra-security-snapshot' -Skip:$SkipSecurity -StepKey 'security' `
+Invoke-Step -Name 'entra-security-snapshot' -Skip:($SkipSecurity -or -not $signedIn) -StepKey 'security' `
+    -SkipReason $(if ($SkipSecurity) { '' } else { $notSignedIn }) `
     -ScriptPath (Join-Path $ToolRoot 'entra-security-snapshot\Get-EntraSecuritySnapshot.ps1') `
     -Arguments @{
         JsonPath  = (Join-Path $OutputRoot 'security-snapshot.json')
@@ -427,7 +686,8 @@ $licenseArgs = @{
 }
 if (Test-Path $pricesPath) { $licenseArgs['PriceList'] = $pricesPath }
 
-Invoke-Step -Name 'm365-license-waste-report' -Skip:$SkipLicensing -StepKey 'licensing' `
+Invoke-Step -Name 'm365-license-waste-report' -Skip:($SkipLicensing -or -not $signedIn) -StepKey 'licensing' `
+    -SkipReason $(if ($SkipLicensing) { '' } else { $notSignedIn }) `
     -ScriptPath (Join-Path $licenseRepo 'Get-LicenseWasteReport.ps1') `
     -Arguments $licenseArgs
 Update-StatsFromOutputs
@@ -437,7 +697,7 @@ Save-HistorySnapshot -Step 'm365-license-waste-report' -Prefix 'licensing' `
 # First-run convenience: if the license report ran and there is still no
 # prices.ini, list the tenant's real SKUs (blank values) so pricing is a
 # fill-in exercise. Never overwrite a file the user has touched.
-if (-not $SkipLicensing -and -not (Test-Path $pricesPath)) {
+if (-not $SkipLicensing -and $signedIn -and -not (Test-Path $pricesPath)) {
     $licJson = Join-Path $OutputRoot 'licensing.json'
     if (Test-Path $licJson) {
         try {
@@ -504,6 +764,12 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Console config not found: $ConfigPath (copy sources.example.ini to sources.ini and edit the paths)"
 }
 
+# The console reads refresh-status.json while it builds: write what this run
+# knows so far (how the sign-in went, what was passed over, certificate days
+# left) so the pages describe THIS refresh, not the previous one.
+$soFar = @($results.ToArray() | Where-Object { $_.Status -in 'FAILED', 'missing' })
+Write-RefreshStatus -Final $false -Ok ($soFar.Count -eq 0)
+
 Invoke-Native -Name 'console build' -StepKey 'build' -Exe $Python -WorkDir $PSScriptRoot `
     -NativeArgs @('build.py', '--config', $ConfigPath, '--out', $SitePath)
 
@@ -556,13 +822,23 @@ if ($failed.Count -or $missing.Count) {
     }
 }
 Update-RefreshStatus -Done -Ok:(-not ($failed.Count -or $missing.Count)) -Summary $summaryLines -Force
+Write-RefreshStatus -Final $true -Ok (-not ($failed.Count -or $missing.Count)) -Summary $summaryLines
 
 # Sign out of the Graph session we opened, so a shared machine doesn't keep a
 # live token cached after the refresh. Only if WE connected - a session you
 # started yourself (e.g. app-only with a certificate) is left for you to manage.
+# The one exception is a person's choice, made in setup: on a machine set to
+# refresh "while I'm signed in", the sign-in is kept so the next automatic run
+# does not have to ask again. An app sign-in is always closed - there is no
+# saved sign-in to protect, and nothing to keep.
 if ($script:GraphConnectedByUs) {
-    try { Disconnect-MgGraph -ErrorAction Stop | Out-Null; Write-Host 'Signed out of Microsoft Graph.' }
-    catch { Write-Warning "Could not sign out of Graph cleanly ($($_.Exception.Message))." }
+    if ($script:SignIn.Mode -eq 'user' -and $keepSignedIn) {
+        Write-Host 'Staying signed in to Microsoft Graph for the next automatic refresh.'
+        Write-Host '  (To sign out, re-run setup and choose "I will click Refresh myself".)'
+    } else {
+        try { Disconnect-MgGraph -ErrorAction Stop | Out-Null; Write-Host 'Signed out of Microsoft Graph.' }
+        catch { Write-Warning "Could not sign out of Graph cleanly ($($_.Exception.Message))." }
+    }
 }
 
 if ($failed.Count -or $missing.Count) {

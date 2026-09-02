@@ -143,10 +143,56 @@ already points at everything else, and puts two shortcuts on your desktop:
 ![Refresh progress](docs/refresh-status.png)
 
 Nothing stores a password: collection is read-only and you sign in
-interactively each refresh. Works in Windows PowerShell 5.1 — the one
+interactively each refresh (or, if you choose it below, a certificate that
+never leaves the computer does). Works in Windows PowerShell 5.1 — the one
 "right-click → Run with PowerShell" actually launches — as well as
 PowerShell 7. Printers are optional; add their IPs to
 `tools\print-fleet-dashboard\config.ini` whenever you get to it.
+
+### Keeping it fresh automatically
+
+Setup's last question is how the console should stay up to date. Three
+answers, and re-running setup lets you change your mind:
+
+1. **I'll click "Refresh IT Ops Data" myself.** The default. Nothing is
+   scheduled, and every refresh signs out of Microsoft 365 when it finishes.
+2. **Refresh every day while I'm signed in.** A Task Scheduler job runs as
+   you, only while you are logged on (if the computer was asleep at the set
+   time it runs when it wakes). No password is stored. To avoid asking you to
+   sign in every morning, **this computer stays signed in to Microsoft Graph
+   (read-only) between refreshes.** That saved sign-in is encrypted to your
+   Windows account by Windows itself, so other local users and a copied disk
+   cannot read it; the footer of every console page and `check-setup.ps1` say
+   in words that it is kept; and picking answer 1 later removes the schedule
+   and signs out on the spot. It can still ask you to sign in again after a
+   password change or a sign-in policy that requires it — and if nobody is
+   there to finish that window within five minutes, the refresh carries on
+   without Microsoft 365 data, keeps the previous numbers, and the console
+   overview says so in one sentence.
+3. **Refresh every day even when nobody is signed in.** For a shared PC or a
+   server. Needs a **Global Administrator once**, about 15 minutes: setup
+   makes a certificate whose private key stays in the computer's certificate
+   store and cannot be exported, saves the public half to your desktop, and
+   prints the exact clicks — register an app, add the same ten *read-only*
+   permissions as application permissions, grant admin consent, upload the
+   certificate, copy two IDs. Setup never creates the app itself; that one
+   write to your tenant stays a human step, on purpose, because everything
+   else here is read-only. It then **proves the sign-in works** (reads your
+   organisation's name) before scheduling anything, and the job runs as
+   SYSTEM, which the folder lock below already trusts. No password anywhere;
+   the certificate lasts two years, and the console and `check-setup.ps1` warn
+   you 30 days before it expires — re-run setup then and it makes a new one.
+
+Whatever the answer, `run-all.ps1` tries the routes it has in order — the
+registered app, then the saved sign-in, then a sign-in window with a time
+limit — and **a route it had to pass over is reported, not hidden**: an
+expired certificate shows on the overview even when the saved sign-in still
+worked. Every refresh writes `output\refresh-status.json` (how it signed in,
+what it passed over, certificate days left); the console reads it for the
+footer note and the overview banner, and `check-setup.ps1` reads it along
+with the Task Scheduler job's last result. The choice itself lives in
+`tools\it-ops-console\automatic-refresh.ini` — schedule, two IDs, a
+thumbprint; nothing secret — and survives updates like every other `.ini`.
 
 **If something goes wrong:** run [`check-setup.ps1`](check-setup.ps1)
 (right-click → Run with PowerShell). It is read-only, says in plain words what
@@ -214,14 +260,20 @@ leaves it alone unless you pass `-FleetConfig` and `-FleetDb`. The fleet
 database is opened read-only by the console, so it is safe to build while the
 collector is writing to it.
 
-Scheduled nightly:
+Scheduling by hand (setup's last question does this for you — see *Keeping
+it fresh automatically* above — but the raw form is):
 
 ```powershell
-$action  = New-ScheduledTaskAction -Execute 'pwsh.exe' `
-    -Argument '-NoProfile -File C:\it-ops\tools\it-ops-console\run-all.ps1 -OutputRoot C:\it-ops\output -SitePath C:\inetpub\wwwroot\console'
+$action  = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument '-NoProfile -File C:\it-ops\tools\it-ops-console\run-all.ps1 -OutputRoot C:\it-ops\output -SitePath C:\inetpub\wwwroot\console -Scheduled -NoStatusPage'
 $trigger = New-ScheduledTaskTrigger -Daily -At 4am
 Register-ScheduledTask -TaskName 'IT ops console' -Action $action -Trigger $trigger
 ```
+
+`-Scheduled` puts a time limit on the sign-in (default five minutes; see
+`-SignInTimeoutSeconds`) so a window nobody is there to finish cannot hang the
+run. Already connected app-only with your own certificate? `-NoConnect` uses
+that session as-is.
 
 ## Permissions
 
@@ -243,9 +295,10 @@ is stored either way — collection is read-only and reads credential *names* an
 expiry dates, never a secret value — so this is about who can read findings, not
 credential theft. `check-setup.ps1` flags it if that lock is ever missing.
 
-Two things this ACL implies. If a **scheduled refresh runs as a service
-account** rather than you, grant that account access to the folder (it inherits
-nothing automatically beyond `SYSTEM`). And if you deliberately **serve
+Two things this ACL implies. Setup's unattended schedule runs as `SYSTEM`,
+which is already in the lock; if you instead run a **scheduled refresh as some
+other service account**, grant that account access to the folder (it inherits
+nothing automatically). And if you deliberately **serve
 `console-site` off this box** — a file share or a web root — you loosen the lock
 on that subfolder yourself; the default assumes the console stays local.
 
@@ -276,12 +329,21 @@ last week's build against today's shows you real drift and not churn.
 
 ```
 python tests/test_console.py
+pwsh tests/test_run_all_signin.ps1
+pwsh tests/test_schedule_refresh.ps1
 ```
 
-55 checks covering freshness classification, timestamp parsing, feed
-degradation (corrupt JSON, missing files, unconfigured sources), every model,
-change detection, rendering with zero feeds configured, HTML escaping of
-hostile input, and a full sample build.
+The Python suite (134 checks) covers freshness classification, timestamp
+parsing, feed degradation (corrupt JSON, missing files, unconfigured sources),
+every model, change detection, rendering with zero feeds configured, HTML
+escaping of hostile input, the automatic-refresh footer note and banners, and a
+full sample build. The two PowerShell suites drive `run-all.ps1` and
+`schedule-refresh.ps1` against stub collectors, a stub Graph module, and stub
+Task Scheduler and certificate cmdlets: every rung of the sign-in ladder made
+to succeed, fail, or hang; the sign-out rule; what Task Scheduler is asked to
+register and as whom; the proof-before-scheduling rule; and that the
+certificate a person uploads is the one kept. Nothing in either touches
+Microsoft 365 or Windows.
 
 ## Licence
 

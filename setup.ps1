@@ -17,11 +17,15 @@
            "IT Ops Console"       opens the console in your browser
            "Refresh IT Ops Data"  runs every collector (you sign in), then
                                   rebuilds the console
-      7. Offer to run that first collection right away - press Enter and
+      7. Ask how the console should stay fresh: you click Refresh yourself,
+         it refreshes daily while you are signed in, or it refreshes daily
+         unattended (a Global Administrator registers a read-only app once)
+      8. Offer to run that first collection right away - press Enter and
          you go from "installed" to looking at your own data in one motion
 
     Everything the collectors do against your tenant is READ-ONLY. Nothing
-    here stores a password - you sign in interactively when data is collected.
+    here stores a password - you sign in interactively when data is collected,
+    or, if you choose it, a certificate that never leaves this computer does.
 
     Works in Windows PowerShell 5.1 (what "right-click > Run with PowerShell"
     gives you) and in PowerShell 7.
@@ -32,8 +36,9 @@
      console-site\ for the built pages)
 
 .PARAMETER Unattended
-    No prompts: accept every default, skip the Python install offer and the
-    run-everything-now offer. For scripted or repeated setups.
+    No prompts: accept every default, skip the Python install offer, leave the
+    automatic-refresh choice as it is, and skip the run-everything-now offer.
+    For scripted or repeated setups.
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
@@ -83,7 +88,7 @@ Write-Host 'This will download five small open-source tools, wire them together,
 Write-Host 'and put two shortcuts on your desktop. Collection against your tenant'
 Write-Host 'is read-only, and you sign in yourself - nothing stores a password.'
 Write-Host ''
-Write-Host 'It asks ONE question now and one at the end. When the window pauses,'
+Write-Host 'It asks ONE question now and two at the end. When the window pauses,'
 Write-Host 'it is waiting for you - pressing Enter accepts the suggested answer.'
 Write-Host ''
 
@@ -135,9 +140,9 @@ $bundleIsInstall = $haveBundle -and ((Resolve-Path $bundleTools).Path -eq (Resol
 if ($haveBundle -and -not $bundleIsInstall) {
     $v = Join-Path $PSScriptRoot 'VERSION'
     $vTxt = if (Test-Path $v) { " v$((Get-Content $v -TotalCount 1).Trim())" } else { '' }
-    Write-Host "--- 1/5 Installing the tools from the bundle$vTxt (no download needed) ---"
+    Write-Host "--- 1/6 Installing the tools from the bundle$vTxt (no download needed) ---"
 } else {
-    Write-Host '--- 1/5 Downloading the tools ---'
+    Write-Host '--- 1/6 Downloading the tools ---'
 }
 foreach ($r in $REPOS) {
     $dest = Join-Path $tools $r
@@ -205,7 +210,7 @@ foreach ($r in $REPOS) {
 
 # --------------------------------------------------------------------------- #
 Write-Host ''
-Write-Host '--- 2/5 Microsoft Graph PowerShell modules ---'
+Write-Host '--- 2/6 Microsoft Graph PowerShell modules ---'
 $toInstall = @($MODULES | Where-Object { -not (Get-Module -ListAvailable -Name $_) })
 if ($toInstall.Count -eq 0) {
     Write-Host '  all present.'
@@ -225,7 +230,7 @@ if ($toInstall.Count -eq 0) {
 
 # --------------------------------------------------------------------------- #
 Write-Host ''
-Write-Host '--- 3/5 Python (builds the console pages) ---'
+Write-Host '--- 3/6 Python (builds the console pages) ---'
 function Get-PythonVersionText {
     # Probe one candidate and return whatever it printed, as plain text.
     # The Microsoft Store ships a stub python.exe (an "App execution alias")
@@ -269,7 +274,7 @@ if ($python) {
 
 # --------------------------------------------------------------------------- #
 Write-Host ''
-Write-Host '--- 4/5 Wiring the console to the tools ---'
+Write-Host '--- 4/6 Wiring the console to the tools ---'
 $consoleDir = Join-Path $tools 'it-ops-console'
 $sources = @"
 # Written by setup.ps1 on $(Get-Date -Format yyyy-MM-dd). Safe to edit.
@@ -286,6 +291,8 @@ fleet       = fleet.db
 # Refresh archives each run here, so the console can show posture over time.
 security_history  = history\security
 licensing_history = history\licensing
+# Refresh writes this each run: how it signed in, the schedule, certificate days left.
+refresh_status    = refresh-status.json
 "@
 Set-Content -Path (Join-Path $consoleDir 'sources.ini') -Value $sources -Encoding UTF8
 Write-Host "  wrote $((Join-Path $consoleDir 'sources.ini'))"
@@ -298,7 +305,7 @@ if ((Test-Path (Join-Path $pfd 'config.example.ini')) -and -not (Test-Path (Join
 
 # --------------------------------------------------------------------------- #
 Write-Host ''
-Write-Host '--- 5/5 Desktop shortcuts ---'
+Write-Host '--- 5/6 Desktop shortcuts ---'
 if ($onWindows) {
     $shell = New-Object -ComObject WScript.Shell
     $desktop = [Environment]::GetFolderPath('Desktop')
@@ -319,6 +326,28 @@ if ($onWindows) {
     Write-Host '  created: "IT Ops Console" and "Refresh IT Ops Data"'
 } else {
     Write-Host '  (not Windows - skipping shortcuts)'
+}
+
+# --------------------------------------------------------------------------- #
+Write-Host ''
+Write-Host '--- 6/6 Keeping the console fresh ---'
+# One question, three answers, handled by schedule-refresh.ps1 (which can also
+# be run again later on its own). It writes automatic-refresh.ini beside
+# run-all.ps1 and, for answers 2 and 3, one Task Scheduler job. Unattended
+# setups never change this - a schedule is a person's decision.
+$scheduler = Join-Path $consoleDir 'schedule-refresh.ps1'
+if ($Unattended) {
+    Write-Host '  automatic refresh: left as it is (run setup without -Unattended to choose)'
+} elseif (-not $onWindows) {
+    Write-Host '  (not Windows - automatic refresh uses Task Scheduler; skipping)'
+} elseif (-not (Test-Path $scheduler)) {
+    Write-Warning "  schedule-refresh.ps1 is missing from $consoleDir - re-run setup from a current release bundle to add automatic refresh."
+} else {
+    # A hashtable, not an array: array splatting hands a script its elements
+    # positionally, so '-Root' would land IN the Root parameter.
+    $schedArgs = @{ Root = $Root }
+    if ($python) { $schedArgs['Python'] = $python }
+    try { & $scheduler @schedArgs } catch { Write-Warning "  Automatic refresh was not changed ($($_.Exception.Message))." }
 }
 
 # --------------------------------------------------------------------------- #

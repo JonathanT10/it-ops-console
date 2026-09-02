@@ -61,17 +61,30 @@ IT Ops Suite v$Version
 Double-click Setup-IT-Ops-Console.cmd. That is the whole instruction.
 
 It installs to C:\IT-Ops (you can change that at the one question it asks),
-puts two shortcuts on your desktop, and offers to run the first collection:
+puts two shortcuts on your desktop, asks how the console should stay fresh,
+and offers to run the first collection:
 
   Refresh IT Ops Data   collects from Microsoft 365 (you sign in, read-only)
                         and rebuilds your console, with live progress
   IT Ops Console        opens the result in your browser
 
+Keeping it fresh - setup's last question, three answers (re-run setup to
+change it):
+  1. I'll click Refresh myself                (nothing scheduled - the default)
+  2. Refresh daily while I'm signed in        (stays signed in to Microsoft 365
+                                               between refreshes so it does not
+                                               ask you each morning; re-run
+                                               setup and pick 1 to sign out)
+  3. Refresh daily even when nobody is signed in
+                                              (a Global Administrator registers
+                                               a read-only app once - setup
+                                               walks you through it; no
+                                               password is stored anywhere)
+
 Everything against your tenant is read-only. Nothing stores a password.
 Setup locks the C:\IT-Ops folder to you and Administrators, so the data it
 collects (admin names, stale accounts, the app inventory) is not readable by
-other people who use this computer. If a scheduled refresh runs as a service
-account, grant that account access to the folder.
+other people who use this computer.
 Printers are optional: put their IPs in
 C:\IT-Ops\tools\print-fleet-dashboard\config.ini and the next Refresh
 picks them up automatically.
