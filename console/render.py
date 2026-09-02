@@ -129,10 +129,25 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .banner .why { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
 footer .refresh-note { display: block; margin-top: 4px; }
 .rules { width: 100%; border-collapse: collapse; }
-.rules td.set { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.rules td.set.off { color: var(--muted); }
-.rules tr.silenced td { color: var(--muted); }
 .rules .help { display: block; font-size: 12px; color: var(--muted); }
+.rules td.ctl { white-space: nowrap; vertical-align: top; padding-top: 9px; }
+.rules input.num { width: 66px; }
+.unit { color: var(--muted); font-size: 12px; margin-left: 6px; }
+input[type=text], input[type=number], select {
+  font: inherit; font-size: 13px; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 5px; padding: 4px 6px; }
+input.wide { width: 320px; max-width: 100%; }
+.sendctl { margin: 4px 0 20px; }
+.sendctl .opt { display: block; margin: 2px 0; cursor: pointer; }
+.tabtoggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.btn { font: inherit; font-weight: 600; color: #fff; background: var(--accent-deep);
+  border: 0; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+.btn:hover { background: var(--accent); }
+.savebox { margin-top: 20px; }
+.savemsg { margin-left: 10px; font-size: 13px; color: var(--ink-2); }
+.savebox textarea { width: 100%; margin-top: 4px; padding: 8px; color: var(--ink);
+  background: var(--page); border: 1px solid var(--border); border-radius: 6px;
+  font: 12px/1.5 ui-monospace, Consolas, "Courier New", monospace; }
 .kv { display: grid; grid-template-columns: 150px 1fr; gap: 6px 14px; font-size: 13.5px; }
 .kv .k { color: var(--ink-2); }
 .tile { display: block; background: var(--surface); border: 1px solid var(--border);

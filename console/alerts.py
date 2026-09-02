@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import re
 
 from .actions import next_step
 from .sources import parse_ts, utcnow
@@ -491,6 +492,7 @@ def default_config():
         "rules": {r.key: r.default for r in CATALOG},
         "options": {k: v[0] for k, v in TAB_OPTIONS.items()},
         "problems": [],      # plain sentences about lines that could not be used
+        "unreadable": False, # the file itself will not parse - not just one line
         "path": None,
         "exists": False,
     }
@@ -511,7 +513,12 @@ def load_config(path):
     try:
         cp.read(path, encoding="utf-8-sig")
     except configparser.Error as e:
-        cfg["problems"].append("alerts.ini could not be read: %s" % e)
+        # Keep the file's own path out of the sentence: the same fault must
+        # read the same whether it is seen in alerts.ini or in a copy of it,
+        # so "was this already broken?" has an honest answer.
+        detail = re.sub(r"\s*While reading from '[^']*'", "", str(e)).strip()
+        cfg["unreadable"] = True
+        cfg["problems"].append("alerts.ini could not be read: %s" % detail)
         return cfg
     problems = cfg["problems"]
 
@@ -831,3 +838,195 @@ def render_example_ini():
                 lines.append("; %s" % help_text)
                 lines.append("%s = %s" % (k, _num(default)))
     return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------- #
+# Editing alerts.ini from the console
+#
+# The Alerts page can produce a small settings block - rules and schedule only,
+# never [teams] or [email], so no webhook or address is ever embedded in a page
+# or put on the clipboard. apply-alerts.py MERGES that block into the real
+# alerts.ini: your comments, your channel settings and anything this console
+# does not recognise stay exactly as they were, and only the lines you changed
+# move. The parse and the merge live here so both the CLI and the tests use the
+# same code the console itself uses to read the file.
+# --------------------------------------------------------------------------- #
+
+CHANNEL_SECTIONS = ("teams", "email")
+CASE_SENSITIVE_KEYS = {("send", "console_link")}
+EDITABLE_SECTIONS = ("send",) + tuple(t for t, _ in TABS)
+
+
+def _split_value(raw):
+    """'yes ; because' -> ('yes', ' ; because'). Keeps a person's own note on
+    the line when only the value changes."""
+    for marker in (" ;", " #"):
+        i = raw.find(marker)
+        if i >= 0:
+            return raw[:i].strip(), raw[i:]
+    return raw.strip(), ""
+
+
+def parse_settings_fragment(text):
+    """Read the block the Alerts page produces.
+
+    Returns (settings, notes): settings is {section: {key: value}} in the order
+    they appeared; notes are plain sentences about anything skipped. Raises
+    ValueError when the text holds nothing this console recognises - which is
+    how "Apply Alert Settings" tells settings apart from whatever else happens
+    to be on the clipboard.
+    """
+    settings, notes, order = {}, [], []
+    section = None
+    recognised = 0
+    for raw in str(text).splitlines():
+        line = raw.strip()
+        if not line or line[0] in ";#":
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            if section in CHANNEL_SECTIONS:
+                notes.append("Left your [%s] settings alone - the console never changes where alerts go." % section)
+            elif section not in EDITABLE_SECTIONS:
+                notes.append("Ignored [%s]: not a section this console knows." % section)
+            continue
+        if section is None or section in CHANNEL_SECTIONS or section not in EDITABLE_SECTIONS:
+            continue
+        eq = line.find("=")
+        if eq < 1:
+            continue
+        key = line[:eq].strip().lower()
+        value, _ = _split_value(line[eq + 1:])
+        if section == "send":
+            if key not in SEND_KEYS:
+                notes.append("Ignored [send] %s: not a setting this console knows." % key)
+                continue
+        else:
+            known = (key == "notify" or ("%s.%s" % (section, key)) in RULES_BY_KEY
+                     or ("%s.%s" % (section, key)) in TAB_OPTIONS)
+            if not known:
+                notes.append("Ignored [%s] %s: not a rule this console knows." % (section, key))
+                continue
+        if section not in settings:
+            settings[section] = {}
+            order.append(section)
+        settings[section][key] = value
+        recognised += 1
+    if not recognised:
+        raise ValueError("that does not look like alert settings")
+    return [(s, settings[s]) for s in order], notes
+
+
+def _ini_index(lines):
+    """(section per line, last content line index per section)."""
+    per_line, last = [], {}
+    section = None
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            last.setdefault(section, i)
+        per_line.append(section)
+        if section is not None and line:
+            last[section] = i
+    return per_line, last
+
+
+def merge_into_ini(target_text, settings):
+    """Put `settings` into the text of an alerts.ini, changing nothing else.
+
+    Returns (new_text, changes) where changes is a list of
+    (section, key, old_value, new_value) for the lines that actually moved.
+    """
+    lines = str(target_text).splitlines()
+    per_line, last = _ini_index(lines)
+    changes, pending = [], []
+
+    for section, keys in settings:
+        for key, value in keys.items():
+            hit = None
+            for i, raw in enumerate(lines):
+                if per_line[i] != section:
+                    continue
+                stripped = raw.strip()
+                if not stripped or stripped[0] in ";#[":
+                    continue
+                eq = stripped.find("=")
+                if eq < 1 or stripped[:eq].strip().lower() != key:
+                    continue
+                hit = i
+                break
+            if hit is None:
+                pending.append((section, key, value))
+                continue
+            raw = lines[hit]
+            eq = raw.find("=")
+            old, trailer = _split_value(raw[eq + 1:])
+            # "Monday" and "monday" are the same setting to load_config, so
+            # they are not a change - rewriting them would churn a person's
+            # file for nothing. A console link is a path: there, case counts.
+            same = (old == value) if (section, key) in CASE_SENSITIVE_KEYS \
+                else (old.strip().lower() == value.strip().lower())
+            if same:
+                continue
+            lines[hit] = "%s= %s%s" % (raw[:eq], value, trailer)
+            changes.append((section, key, old, value))
+
+    # Keys the file did not have yet: add them under their section (or add the
+    # section at the end), so a file written by an older version fills in.
+    for section, key, value in pending:
+        if section in last:
+            at = last[section] + 1
+            lines.insert(at, "%s = %s" % (key, value))
+            per_line, last = _ini_index(lines)
+        else:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append("[%s]" % section)
+            lines.append("%s = %s" % (key, value))
+            per_line, last = _ini_index(lines)
+        changes.append((section, key, "", value))
+
+    text = "\n".join(lines)
+    if not text.endswith("\n"):
+        text += "\n"
+    return text, changes
+
+
+def describe_changes(changes):
+    """Plain sentences for what a merge moved - the words "Apply Alert
+    Settings" prints back to whoever clicked it."""
+    out = []
+    for section, key, old, new in changes:
+        if section == "send":
+            if key == "when":
+                out.append("Messages: %s." % ("only when something changes" if new == "changes"
+                                              else "a summary after every refresh"))
+            elif key == "digest_day":
+                out.append("Weekly summary: %s." % (new.capitalize() if new else "never"))
+            elif key == "console_link":
+                out.append("Console link: %s." % (new if new else "removed"))
+            else:
+                out.append("%s: %s." % (key, new))
+            continue
+        label = TAB_LABEL.get(section, section)
+        if key == "notify":
+            on = str(new).lower() in ("yes", "true", "on", "1")
+            out.append("%s: %s." % (label, "alerts back on" if on else "all alerts silenced"))
+            continue
+        rule = RULES_BY_KEY.get("%s.%s" % (section, key))
+        if rule is None:
+            out.append("%s %s: %s." % (label, key, new))
+            continue
+        def _read(v):
+            if rule.kind == "switch":
+                return rule_setting_text(rule, str(v).lower() in ("yes", "true", "on", "1"))
+            try:
+                return rule_setting_text(rule, float(v or 0))
+            except ValueError:
+                return str(v)
+        if old == "":
+            out.append("%s - %s: %s (added)." % (label, rule.label, _read(new)))
+        else:
+            out.append("%s - %s: %s to %s." % (label, rule.label, _read(old), _read(new)))
+    return out

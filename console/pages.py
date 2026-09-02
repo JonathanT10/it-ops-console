@@ -689,6 +689,72 @@ def build_changes(m, feed, available, generated):
 # Alerts
 # --------------------------------------------------------------------------- #
 
+ALERTS_JS = r"""
+/* The console is a renderer: this is the one page with any script, and all it
+   does is turn the controls above into TEXT for you to copy. It talks to
+   nothing, stores nothing, and never sees where your alerts go. */
+(function () {
+  var out = document.getElementById('settings-text');
+  var btn = document.getElementById('save-btn');
+  var msg = document.getElementById('save-msg');
+  if (!out || !btn) { return; }
+  function valueOf(el) {
+    var kind = el.getAttribute('data-kind');
+    if (kind === 'switch') { return el.checked ? 'yes' : 'no'; }
+    if (kind === 'radio') { return el.checked ? el.value : null; }
+    var v = (el.value || '').trim();
+    if (kind === 'number' && v === '') { return '0'; }
+    return v;
+  }
+  function build() {
+    var els = document.querySelectorAll('[data-sec]');
+    var order = [], bySection = {};
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var v = valueOf(el);
+      if (v === null) { continue; }
+      var sec = el.getAttribute('data-sec');
+      if (!bySection[sec]) { bySection[sec] = []; order.push(sec); }
+      bySection[sec].push(el.getAttribute('data-key') + ' = ' + v);
+    }
+    var lines = ['# IT Ops Console alert settings, made in the console.',
+                 '# Double-click "Apply Alert Settings" on your desktop to use them.',
+                 '# Your Teams and email settings, and any notes in alerts.ini, are kept.',
+                 ''];
+    for (var j = 0; j < order.length; j++) {
+      lines.push('[' + order[j] + ']');
+      lines = lines.concat(bySection[order[j]]);
+      lines.push('');
+    }
+    out.value = lines.join('\n');
+    if (msg) { msg.textContent = ''; }
+  }
+  document.addEventListener('change', build);
+  document.addEventListener('input', build);
+  btn.addEventListener('click', function () {
+    var copied = false;
+    try { out.focus(); out.select(); copied = document.execCommand('copy'); } catch (e) { copied = false; }
+    var saved = false;
+    try {
+      var blob = new Blob([out.value], { type: 'text/plain' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'alert-settings.txt';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      saved = true;
+    } catch (e) { saved = false; }
+    var where = saved ? ' A copy is in your Downloads folder.' : '';
+    msg.textContent = copied
+      ? 'Copied. Now double-click "Apply Alert Settings" on your desktop.' + where
+      : 'Select the text below and press Ctrl+C, then double-click "Apply Alert Settings" on your desktop.' + where;
+  });
+  build();
+})();
+"""
+
+
 SEV_BADGE = {
     "critical": lambda: badge("critical", "warn", "critical"),
     "warning":  lambda: badge("warning", "warn", "warning"),
@@ -710,6 +776,7 @@ def alerts_page_model(fired, cfg, state, channels):
                 continue
             val = cfg["rules"].get(r.key, r.default)
             rows.append({"id": r.id, "label": r.label, "help": r.help, "severity": r.severity,
+                         "kind": r.kind, "unit": r.unit, "value": val,
                          "setting": alert_rules.rule_setting_text(r, val),
                          "on": bool(val) if r.kind == "switch" else (float(val or 0) > 0)})
         rules.append({"tab": tab, "label": label, "notify": cfg["tabs"].get(tab, {}).get("notify", True), "rows": rows})
@@ -720,8 +787,10 @@ def alerts_page_model(fired, cfg, state, channels):
         "email_to": list(em["to"]),
         "email_relay": em["smtp_server"],
         "any_channel": channels["any"],
+        "when": when,
         "when_text": ("only when an alert appears, gets worse, or clears" if when == "changes"
                       else "a summary after every refresh"),
+        "digest_day": day,
         "digest_text": ("every %s" % day.capitalize()) if day else "never",
         "console_link": cfg["send"]["console_link"],
         "config_path": cfg.get("path") or "alerts.ini",
@@ -733,6 +802,15 @@ def alerts_page_model(fired, cfg, state, channels):
         "last_sent": (state or {}).get("last_sent"),
         "history": hist[:6],
     }
+
+
+def _numtxt(v):
+    """A threshold as a person would type it: 90, not 90.0."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return "%d" % int(f) if abs(f - round(f)) < 1e-9 else ("%g" % f)
 
 
 def _group_alerts(fired):
@@ -755,13 +833,9 @@ def build_alerts(am, available, generated):
         kv.append(("Email", "to %s via %s" % (esc(", ".join(am["email_to"])), esc(am["email_relay"]))))
     else:
         kv.append(("Email", "not set up"))
-    kv.append(("When", am["when_text"]))
-    kv.append(("Weekly summary", am["digest_text"]))
-    if am["console_link"]:
-        kv.append(("Console link", esc(am["console_link"])))
     kv.append(("Last message", esc(am["last_sent"][:16].replace("T", " ") + " UTC") if am["last_sent"] else "none yet"))
     where = '<div class="kv">%s</div>' % "".join(
-        '<span class="k">%s</span><span>%s</span>' % (esc(k), v if k in ("Email", "Console link", "Last message") else esc(v))
+        '<span class="k">%s</span><span>%s</span>' % (esc(k), v if k in ("Email", "Last message") else esc(v))
         for k, v in kv)
     setup_note = ""
     if not am["any_channel"]:
@@ -770,8 +844,9 @@ def build_alerts(am, available, generated):
                       'channel\'s Workflows URL under <code>[teams]</code>, or fill in <code>[email]</code>; then '
                       'run <code>python notify.py --test</code> from the console folder to see one arrive.</div></div>'
                       % (ICONS["warn"], esc(am["config_path"])))
-    where_html = ('<section><h2>Where alerts go</h2><p class="note">Set in alerts.ini. The refresh sends a '
-                  'message %s.</p>%s%s</section>' % (esc(am["when_text"]), setup_note, where))
+    where_html = ('<section><h2>Where alerts go</h2><p class="note">The refresh sends a message %s. '
+                  'Which channel is set in alerts.ini; everything else below you can change here.</p>%s%s</section>'
+                  % (esc(am["when_text"]), setup_note, where))
 
     # -- firing now ------------------------------------------------------- #
     n = len(am["fired"])
@@ -790,22 +865,74 @@ def build_alerts(am, available, generated):
         firing = ('<section><h2>Firing now</h2><p class="note">Nothing - every rule that is on is quiet.'
                   '</p></section>')
 
-    # -- what is watched -------------------------------------------------- #
+    # -- what is watched: the editor ------------------------------------- #
+    # These controls only ever produce TEXT, in the box at the bottom of the
+    # section: the page cannot write to your install by itself, and it is
+    # deliberately never given your Teams webhook or mail settings, because
+    # console-site is a folder people copy onto shares.
+    days = [("", "never")] + [(d, d.capitalize()) for d in alert_rules.WEEKDAYS]
+    day_options = "".join('<option value="%s"%s>%s</option>'
+                          % (esc(v), " selected" if v == am["digest_day"] else "", esc(t))
+                          for v, t in days)
+    send_ctl = (
+        '<div class="kv sendctl">'
+        '<span class="k">Send a message</span><span>'
+        '<label class="opt"><input type="radio" name="when" data-sec="send" data-key="when" '
+        'data-kind="radio" value="changes"%s> only when something is new, worse or cleared</label>'
+        '<label class="opt"><input type="radio" name="when" data-sec="send" data-key="when" '
+        'data-kind="radio" value="every-refresh"%s> after every refresh, even when nothing changed</label>'
+        '</span>'
+        '<span class="k">Weekly summary</span><span><select data-sec="send" data-key="digest_day" '
+        'data-kind="select">%s</select> <span class="help">everything still open, on this day</span></span>'
+        '<span class="k">Console link</span><span><input type="text" class="wide" data-sec="send" '
+        'data-key="console_link" data-kind="text" value="%s" placeholder="https://... or \\\\server\\share"> '
+        '<span class="help">shown at the bottom of every message</span></span>'
+        '</div>'
+        % (" checked" if am["when"] != "every-refresh" else "",
+           " checked" if am["when"] == "every-refresh" else "",
+           day_options, esc(am["console_link"])))
+
     tables = []
     for t in am["rules"]:
         trs = []
         for r in t["rows"]:
-            cls = "" if r["on"] and t["notify"] else "silenced"
-            trs.append('<tr class="%s"><td>%s<span class="help">%s</span></td><td class="set %s">%s</td><td>%s</td></tr>'
-                       % (cls, esc(r["label"]), esc(r["help"]), "" if r["on"] else "off",
-                          esc(r["setting"]), SEV_BADGE.get(r["severity"], SEV_BADGE["info"])()))
-        silenced = "" if t["notify"] else ' <span class="muted">(notify = no: this tab is silenced)</span>'
-        tables.append('<h3>%s%s</h3><div class="scroll"><table class="rules"><thead><tr><th>Rule</th>'
-                      '<th>Setting</th><th>Severity</th></tr></thead><tbody>%s</tbody></table></div>'
-                      % (esc(t["label"]), silenced, "".join(trs)))
-    watched = ('<section><h2>What is watched</h2><p class="note">One line per rule in alerts.ini: yes/no, '
-               'or a number where 0 means off. Change a line and the next refresh uses it.</p>%s</section>'
-               % "".join(tables))
+            rid = "r-%s-%s" % (t["tab"], r["id"])
+            if r["kind"] == "switch":
+                ctl = ('<input type="checkbox" id="%s" data-sec="%s" data-key="%s" data-kind="switch"%s>'
+                       % (esc(rid), esc(t["tab"]), esc(r["id"]), " checked" if r["value"] else ""))
+                unit = ""
+            else:
+                ctl = ('<input type="number" class="num" id="%s" data-sec="%s" data-key="%s" '
+                       'data-kind="number" min="0" step="1" value="%s">'
+                       % (esc(rid), esc(t["tab"]), esc(r["id"]), esc(_numtxt(r["value"]))))
+                unit = '<span class="unit">%s</span>' % esc(r["unit"] if r["unit"] != "$" else "$ / month")
+            trs.append('<tr><td class="ctl">%s%s</td><td><label for="%s">%s</label>'
+                       '<span class="help">%s</span></td><td>%s</td></tr>'
+                       % (ctl, unit, esc(rid), esc(r["label"]), esc(r["help"]),
+                          SEV_BADGE.get(r["severity"], SEV_BADGE["info"])()))
+        tables.append('<h3><label class="tabtoggle"><input type="checkbox" data-sec="%s" data-key="notify" '
+                      'data-kind="switch"%s> %s</label></h3>'
+                      '<div class="scroll"><table class="rules"><thead><tr><th>Setting</th><th>Rule</th>'
+                      '<th>Severity</th></tr></thead><tbody>%s</tbody></table></div>'
+                      % (esc(t["tab"]), " checked" if t["notify"] else "", esc(t["label"]), "".join(trs)))
+
+    savebox = (
+        '<div class="savebox">'
+        '<button type="button" id="save-btn" class="btn">Save settings</button>'
+        '<span id="save-msg" class="savemsg"></span>'
+        '<p class="note">This is exactly what gets applied. Where alerts go is not in it and is never '
+        'changed from this page. Reload the page to go back to the saved settings.</p>'
+        '<textarea id="settings-text" rows="10" readonly spellcheck="false"></textarea>'
+        '</div>'
+        '<noscript><p class="note">This page needs JavaScript to build the settings for you. '
+        'Without it, edit alerts.ini directly - every rule above is one line in that file.</p></noscript>')
+
+    watched = ('<section><h2>Change what you are told about</h2>'
+               '<p class="note">Tick, untick, or change a number - 0 means off; the box beside a tab '
+               'name silences that whole tab at once. Then click <b>Save settings</b> and double-click '
+               '<b>Apply Alert Settings</b> on your desktop. Nothing here changes until you do both.</p>'
+               '%s%s%s</section>'
+               % (send_ctl, "".join(tables), savebox))
 
     # -- how the file was read ------------------------------------------- #
     if not am["config_exists"]:
@@ -828,6 +955,6 @@ def build_alerts(am, available, generated):
             % (esc(str(h.get("when", ""))[:10]), esc(h.get("title", "")),
                esc(", ".join(h.get("channels") or []) or "sent")) for h in am["history"]))
 
-    body = where_html + firing + watched + read + hist_html
+    body = where_html + firing + watched + read + hist_html + ("<script>%s</script>" % ALERTS_JS)
     return shell("Alerts", "alerts", available, body, generated,
                  subtitle="What this console tells you about, where, and what is firing right now.")
