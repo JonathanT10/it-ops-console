@@ -136,6 +136,13 @@ def load_licensing(path):
     return d, parse_ts(d.get("GeneratedUtc"))
 
 
+def load_refresh_status(path):
+    """it-ops-console run-all.ps1 refresh-status.json: how the last refresh
+    signed in, the schedule this machine is on, certificate days left."""
+    d = _load_json(path)
+    return d, parse_ts(d.get("GeneratedUtc"))
+
+
 def load_history(path):
     """entra-tenant-docs history/ folder -> snapshots oldest first."""
     snaps = []
@@ -210,6 +217,10 @@ LOADERS = {
     # files carry GeneratedUtc, so the tenant-docs history loader fits as-is.
     "security_history":  ("Security trend",  load_history),
     "licensing_history": ("Licensing trend", load_history),
+    # run-all writes this every refresh. It is about the refresh itself, not a
+    # domain: the overview turns it into a one-line footer note and, only when
+    # something needs a person, a banner.
+    "refresh_status":    ("Automatic refresh", load_refresh_status),
 }
 
 

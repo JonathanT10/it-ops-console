@@ -118,6 +118,16 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .bar-row .c { font-size: 12.5px; font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.banner { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 14px;
+  padding: 10px 14px; border: 1px solid var(--border); border-left: 4px solid var(--warning);
+  border-radius: 6px; background: var(--surface); font-size: 13.5px; }
+.banner > svg { width: 16px; height: 16px; flex: none; margin-top: 2px; color: var(--warning); }
+.banner.serious { border-left-color: var(--serious); }
+.banner.serious > svg { color: var(--serious); }
+.banner.critical { border-left-color: var(--critical); }
+.banner.critical > svg { color: var(--critical); }
+.banner .why { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
+footer .refresh-note { display: block; margin-top: 4px; }
 .tile { display: block; background: var(--surface); border: 1px solid var(--border);
   border-radius: 12px; padding: 15px 16px; text-decoration: none; color: inherit; }
 .tile:hover { border-color: var(--accent); }
@@ -173,6 +183,10 @@ ICONS = {
 
 # Set by build.py when a VERSION file ships beside it (release bundles do).
 SUITE_VERSION = ""
+# Set by build.py from refresh-status.json: one sentence about how this machine
+# keeps itself fresh (and, when it applies, that it stays signed in between
+# refreshes). Every page's footer carries it, so that state is never hidden.
+REFRESH_NOTE = ""
 
 PAGES = [
     ("index",     "Overview"),
@@ -355,10 +369,11 @@ def shell(title, current, available, body, generated, subtitle=""):
 <header class="page"><h1>%s</h1><div class="sub">%s</div></header>
 %s
 <footer>Built by <a href="https://github.com/JonathanT10/it-ops-console">it-ops-console</a>%s
-at %s (UTC) from the tools' own output. Each page is self-contained.</footer>
+at %s (UTC) from the tools' own output. Each page is self-contained.%s</footer>
 </div></body></html>""" % (
         esc(title), CSS, nav(current, available), esc(title), subtitle, body,
-        (" (suite v%s)" % esc(SUITE_VERSION)) if SUITE_VERSION else "", esc(generated)
+        (" (suite v%s)" % esc(SUITE_VERSION)) if SUITE_VERSION else "", esc(generated),
+        ('<span class="refresh-note">%s</span>' % esc(REFRESH_NOTE)) if REFRESH_NOTE else ""
     )
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .render import (bar_rows, badge, delta_badge, esc, fmt_metric, freshness_chip,
+from .render import (ICONS, bar_rows, badge, delta_badge, esc, fmt_metric, freshness_chip,
                      meter, money, muted_badge, shell, sparkline, status_badge, trend_card)
 
 
@@ -151,6 +151,19 @@ def _tile_trend(metric):
 # Overview
 # --------------------------------------------------------------------------- #
 
+def _refresh_banners(refresh):
+    """Only when a person must act (see model.refresh_model). A refresh that
+    simply worked adds nothing here - the footer note carries the schedule."""
+    if not refresh or not refresh.get("banners"):
+        return ""
+    out = []
+    for b in refresh["banners"]:
+        why = ('<span class="why">%s</span>' % esc(b["detail"])) if b.get("detail") else ""
+        out.append('<div class="banner %s" role="status">%s<div>%s%s</div></div>'
+                   % (esc(b.get("tone") or "warning"), ICONS["warn"], esc(b["text"]), why))
+    return "".join(out)
+
+
 def build_overview(models, feeds, available, generated):
     tiles = []
 
@@ -296,7 +309,9 @@ def build_overview(models, feeds, available, generated):
         urgent_html = ('<section><h2>Needs a human</h2>'
                        '<p class="note">%s</p>%s</section>' % (note, rows))
 
-    stale = [f for f in feeds.values() if f.ok and f.state == "stale"]
+    # refresh_status is about the refresh itself, not a domain: when it is old,
+    # every real feed is old too and already listed - naming it again is noise.
+    stale = [f for f in feeds.values() if f.ok and f.state == "stale" and f.key != "refresh_status"]
     stale_html = ""
     if stale:
         stale_html = ('<section><h2>Stale data</h2><p class="note">These feeds are old enough '
@@ -306,7 +321,8 @@ def build_overview(models, feeds, available, generated):
                                 '<span>%s <span class="cat">&mdash; %s</span></span></div>'
                                 % (esc(f.label), esc(f.age), esc(f.path)) for f in stale))
 
-    body = ('<div class="tiles">%s</div>%s%s' % ("".join(tiles), urgent_html, stale_html))
+    body = ('%s<div class="tiles">%s</div>%s%s'
+            % (_refresh_banners(models.get("refresh")), "".join(tiles), urgent_html, stale_html))
     return shell("Overview", "index", available, body, generated,
                  subtitle="One card per domain. Open a card for that topic only.")
 

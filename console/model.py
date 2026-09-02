@@ -449,3 +449,101 @@ def _diff_snapshots(prev, cur, ts):
                 if k not in b:
                     add(label, "removed", k)
     return ev
+
+
+# --------------------------------------------------------------------------- #
+# Automatic refresh (run-all's refresh-status.json)
+# --------------------------------------------------------------------------- #
+
+CERT_WARN_DAYS = 30
+
+
+def _when_text(ts):
+    if ts is None:
+        return "time unknown"
+    return "%d %s %s UTC" % (ts.day, ts.strftime("%b"), ts.strftime("%H:%M"))
+
+
+def refresh_model(feed):
+    """How this machine keeps the console fresh, and whether the last automatic
+    refresh needs a person. None when run-all has never written the file (an
+    install older than this feature, or a console built straight from build.py).
+
+    Two outputs, deliberately small:
+      note     - one sentence for every page's footer: the schedule this machine
+                 is on, and, when it applies, that it stays signed in between
+                 refreshes. Never a hidden state.
+      banners  - shown on the overview ONLY when a person must act: the last
+                 automatic refresh could not sign in, it had to fall back to a
+                 different sign-in route, or the certificate is about to expire.
+                 A refresh that simply worked adds nothing to the page.
+    """
+    if feed is None or not feed.ok:
+        return None
+    d = feed.data or {}
+    sched = d.get("Schedule") or {}
+    signin = d.get("SignIn") or {}
+    cert = d.get("Certificate") or None
+    mode = str(sched.get("Mode") or "off").lower()
+    time_ = str(sched.get("Time") or "").strip()
+    keep = bool(d.get("KeepSignedIn"))
+    when = _when_text(parse_ts(d.get("GeneratedUtc")))
+
+    if mode == "while-signed-in":
+        note = "Automatic refresh: every day at %s while you're signed in." % (time_ or "the set time")
+        if keep:
+            note += " This computer stays signed in to Microsoft Graph (read-only) between refreshes."
+    elif mode == "unattended":
+        note = ("Automatic refresh: every day at %s as the registered app, whether or not anyone is signed in."
+                % (time_ or "the set time"))
+        if cert and cert.get("Expires"):
+            note += " Certificate expires %s." % cert["Expires"]
+    else:
+        note = 'Automatic refresh is off - "Refresh IT Ops Data" on the desktop updates this console.'
+
+    banners = []
+    if d.get("Scheduled") and signin.get("Ok") is False:
+        banners.append({
+            "tone": "warning",
+            "text": ("The last automatic refresh (%s) couldn't sign in, so the Microsoft 365 numbers "
+                     "are from the run before it. Double-click \"Refresh IT Ops Data\" to sign in and "
+                     "collect them." % when),
+            "detail": signin.get("Detail") or "",
+        })
+    elif d.get("Scheduled") and signin.get("Dropped"):
+        first = str(signin["Dropped"][0]).rstrip(".")
+        banners.append({
+            "tone": "warning",
+            "text": ("The last automatic refresh (%s) couldn't use its usual sign-in: %s. "
+                     "It still signed in another way and ran." % (when, first)),
+            "detail": "",
+        })
+    if cert and cert.get("DaysLeft") is not None:
+        try:
+            left = int(cert["DaysLeft"])
+        except (TypeError, ValueError):
+            left = None
+        if left is not None and left < 0:
+            banners.append({
+                "tone": "serious",
+                "text": ("The automatic-refresh certificate expired on %s. Re-run setup to make a new one "
+                         "and upload it." % (cert.get("Expires") or "an earlier date")),
+                "detail": "",
+            })
+        elif left is not None and left <= CERT_WARN_DAYS:
+            banners.append({
+                "tone": "warning",
+                "text": ("The automatic-refresh certificate expires in %d day%s (%s). Re-run setup to renew it."
+                         % (left, "" if left == 1 else "s", cert.get("Expires") or "")),
+                "detail": "",
+            })
+
+    return {
+        "mode": mode,
+        "time": time_,
+        "keep_signed_in": keep,
+        "signin_mode": signin.get("Mode"),
+        "when": when,
+        "note": note,
+        "banners": banners,
+    }
