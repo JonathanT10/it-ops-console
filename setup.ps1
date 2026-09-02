@@ -226,20 +226,33 @@ if ($toInstall.Count -eq 0) {
 # --------------------------------------------------------------------------- #
 Write-Host ''
 Write-Host '--- 3/5 Python (builds the console pages) ---'
+function Get-PythonVersionText {
+    # Probe one candidate and return whatever it printed, as plain text.
+    # The Microsoft Store ships a stub python.exe (an "App execution alias")
+    # that only opens the Store: it prints "Python was not found..." to STDERR
+    # and exits. Under Windows PowerShell 5.1 that stderr line surfaces as a red
+    # NativeCommandError in the middle of setup - alarming to a reader, and it
+    # aborts the probing statement. So let cmd.exe run the probe and merge
+    # stderr into stdout itself: PowerShell then only ever sees strings.
+    param([string]$Candidate)
+    $ErrorActionPreference = 'Continue'   # function-scoped; the caller's 'Stop' is untouched
+    try {
+        if ($onWindows) { return ((& cmd.exe /d /c "$Candidate --version 2>&1" | Out-String).Trim()) }
+        return ((& $Candidate --version 2>&1 | Out-String).Trim())   # no Store stub off Windows
+    } catch { return '' }
+}
 function Get-WorkingPython {
+    # A real interpreter answers --version with "Python 3.x"; the Store stub and
+    # anything else do not. The verdict rests on that text alone.
     foreach ($cand in @('python', 'python3', 'py')) {
-        $cmd = Get-Command $cand -ErrorAction SilentlyContinue
-        if (-not $cmd) { continue }
-        # The Microsoft Store ships a fake python.exe that only opens the Store.
-        # A real interpreter answers --version; the stub prints an install hint.
-        $out = & $cand --version 2>&1
-        if ("$out" -match 'Python 3') { return $cand }
+        if (-not (Get-Command $cand -ErrorAction SilentlyContinue)) { continue }
+        if ((Get-PythonVersionText $cand) -match 'Python 3') { return $cand }
     }
     return $null
 }
 $python = Get-WorkingPython
 if ($python) {
-    Write-Host "  found: $python ($(& $python --version 2>&1))"
+    Write-Host "  found: $python ($(Get-PythonVersionText $python))"
 } else {
     Write-Warning '  Python 3 not found. The collectors still work without it, but the'
     Write-Warning '  console pages cannot be built until it is installed.'

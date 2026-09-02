@@ -79,9 +79,12 @@ foreach ($m in 'Microsoft.Graph.Authentication','Microsoft.Graph.Users','Microso
     if (Get-Module -ListAvailable -Name $m) { Say "module: $m" } else { Gap "module missing: $m - re-run setup, or: Install-Module $m -Scope CurrentUser" }
 }
 $py = $null
-foreach ($c in 'python','py') {
-    $cmd = Get-Command $c -ErrorAction SilentlyContinue
-    if ($cmd -and ("$(& $c --version 2>&1)" -match 'Python 3')) { $py = $c; break }
+foreach ($c in 'python','python3','py') {
+    if (-not (Get-Command $c -ErrorAction SilentlyContinue)) { continue }
+    # cmd.exe merges the Store stub's stderr "Python was not found..." into
+    # plain text, so a health check never prints a red error for a fake python.
+    $v = try { (& cmd.exe /d /c "$c --version 2>&1" | Out-String) } catch { '' }
+    if ("$v" -match 'Python 3') { $py = $c; break }
 }
 if ($py) { Say "Python 3 ($py)" } else { Gap 'Python 3 not found - the console pages cannot rebuild without it. Install from python.org (tick "Add python.exe to PATH")' }
 
