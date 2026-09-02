@@ -155,6 +155,29 @@ if ($mode -ne 'off') {
         } catch { Note "could not read the task's run history ($($_.Exception.Message))" }
     }
 }
+# ---- alerts ---- #
+$alertsIni = Join-Path (Join-Path $tools 'it-ops-console') 'alerts.ini'
+if (Test-Path $alertsIni) {
+    $hook = ''; $relay = ''
+    foreach ($raw in Get-Content $alertsIni) {
+        $l = $raw.Trim()
+        if ($l -match '^\s*webhook\s*=\s*(\S.*)$') { $hook = $matches[1].Trim() }
+        if ($l -match '^\s*smtp_server\s*=\s*(\S.*)$') { $relay = $matches[1].Trim() }
+    }
+    if (-not $hook -and $env:ITOPS_TEAMS_WEBHOOK) { $hook = 'env' }
+    $where = @(); if ($hook) { $where += 'Teams' }; if ($relay) { $where += "email via $relay" }
+    if ($where.Count) { Say "alerts go to $($where -join ' and ') (rules in alerts.ini; the console's Alerts page shows what is firing)" }
+    else { Note 'alerts are not sent anywhere yet - paste a Teams Workflows URL into alerts.ini [teams] webhook, then: python notify.py --test' }
+    $asPath = Join-Path $output 'alerts-state.json'
+    if ((Test-Path $asPath) -and $where.Count) {
+        try {
+            $as = Get-Content $asPath -Raw | ConvertFrom-Json
+            if ($as.last_sent) { Say "last alert message: $($as.last_sent)$(if ($as.history) { ' - ' + $as.history[0].title })" }
+            else { Note 'no alert message has been sent yet (nothing new since alerts were set up, or the first refresh has not run)' }
+        } catch { }
+    }
+} else { Note 'alerts.ini is missing - re-run setup to add it (alerts stay off without it)' }
+
 $rsPath = Join-Path $output 'refresh-status.json'
 if (Test-Path $rsPath) {
     try {

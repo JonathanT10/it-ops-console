@@ -17,6 +17,12 @@
     feed as stale rather than quietly serving last week's numbers. The exit
     code is non-zero if anything failed, so a scheduled task shows red.
 
+    After the build, alerts: build.py has already worked out what is firing
+    (output\alerts.json, from the rules in alerts.ini beside this script);
+    notify.py then sends a Teams and/or email message ONLY when something is
+    new, worse or cleared since the last one (or a weekly summary). With no
+    channel in alerts.ini the step is skipped, in words, and nothing else changes.
+
 .PARAMETER ToolRoot
     Folder containing the tool repos (entra-tenant-docs, entra-security-snapshot,
     m365-license-waste-report, print-fleet-dashboard). Defaults to this repo's
@@ -78,6 +84,12 @@
     How long a scheduled run waits for a sign-in window to be finished before
     giving up on Microsoft 365 for this run. Default 300 (5 minutes).
 
+.PARAMETER AlertsConfig
+    The alerts.ini to use. Defaults to the file beside this script.
+
+.PARAMETER SkipAlerts
+    Build everything but send no alert message this run.
+
 .EXAMPLE
     .\run-all.ps1 -OutputRoot C:\it-ops\output -SitePath C:\inetpub\console
 
@@ -108,7 +120,9 @@ param(
     [switch]$NoStatusPage,
     [switch]$Scheduled,
     [string]$RefreshConfig,
-    [ValidateRange(30, 3600)][int]$SignInTimeoutSeconds = 300
+    [ValidateRange(30, 3600)][int]$SignInTimeoutSeconds = 300,
+    [string]$AlertsConfig,
+    [switch]$SkipAlerts
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,6 +135,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $ToolRoot)      { $ToolRoot      = Split-Path -Parent $PSScriptRoot }
 if (-not $ConfigPath)    { $ConfigPath    = Join-Path $PSScriptRoot 'sources.ini' }
 if (-not $RefreshConfig) { $RefreshConfig = Join-Path $PSScriptRoot 'automatic-refresh.ini' }
+if (-not $AlertsConfig)  { $AlertsConfig  = Join-Path $PSScriptRoot 'alerts.ini' }
 
 $results = [System.Collections.Generic.List[object]]::new()
 
@@ -142,6 +157,9 @@ function Get-PlainWords {
     # The sign-in step composes its own plain sentence as it goes (which route
     # it tried, why each was passed over) - pass that through untouched.
     if ($Step -eq 'sign-in') { return $Detail }
+    if ($Step -eq 'alerts') {
+        return 'The alert message could not be sent - check the Teams Workflows URL or the mail relay in alerts.ini. The console itself was rebuilt.'
+    }
     switch -Wildcard ($Detail) {
         '*AADSTS*'                       { return 'The sign-in did not complete. Run this again and finish the sign-in window.' }
         '*Authentication needed*'        { return 'You were not signed in. Run this again and finish the sign-in window.' }
@@ -178,6 +196,7 @@ $script:StatusSteps = @(
     [pscustomobject]@{ key='licensing'; label='Reviewing licenses';                   detail='Paid seats nobody is using';                            state='pending'; seconds=$null; now=$null }
     [pscustomobject]@{ key='fleet';     label='Polling printers';                     detail='Optional - only when printers are configured';          state='pending'; seconds=$null; now=$null }
     [pscustomobject]@{ key='build';     label='Building your console';                detail='Turning everything into readable pages';                state='pending'; seconds=$null; now=$null }
+    [pscustomobject]@{ key='alerts';    label='Sending alerts';                       detail='Only if something is new, worse or cleared';           state='pending'; seconds=$null; now=$null }
 )
 
 function Update-RefreshStatus {
@@ -772,6 +791,36 @@ Write-RefreshStatus -Final $false -Ok ($soFar.Count -eq 0)
 
 Invoke-Native -Name 'console build' -StepKey 'build' -Exe $Python -WorkDir $PSScriptRoot `
     -NativeArgs @('build.py', '--config', $ConfigPath, '--out', $SitePath)
+
+# --------------------------------------------------------------------------- #
+# Alerts
+# --------------------------------------------------------------------------- #
+# notify.py is the one thing here that sends anything, and only to the Teams
+# webhook / mail relay named in alerts.ini. It runs only when a channel is
+# actually configured and the console build (which wrote alerts.json) worked.
+$buildOk = @($results.ToArray() | Where-Object { $_.Step -eq 'console build' -and $_.Status -eq 'ok' }).Count -gt 0
+$alertsIni = Read-IniFile $AlertsConfig
+$teamsHook = Get-IniValue $alertsIni 'teams' 'webhook'
+if (-not $teamsHook -and $env:ITOPS_TEAMS_WEBHOOK) { $teamsHook = $env:ITOPS_TEAMS_WEBHOOK }
+$mailRelay = Get-IniValue $alertsIni 'email' 'smtp_server'
+$haveChannel = [bool]($teamsHook -or $mailRelay)
+if ($SkipAlerts) {
+    Add-Result 'alerts' 'skipped'
+    Set-StepState 'alerts' 'skipped'
+} elseif (-not $haveChannel) {
+    Add-Result 'alerts' 'skipped' 'no Teams or email channel in alerts.ini'
+    Set-StepState 'alerts' 'skipped' -Detail 'Optional - paste a Teams Workflows URL into alerts.ini and Refresh again'
+    Write-Host ''
+    Write-Host "Alerts: not set up (no channel in $AlertsConfig). The console's Alerts page shows what would be sent."
+} elseif (-not $buildOk) {
+    Add-Result 'alerts' 'skipped' 'console build did not finish, so alerts.json is not current'
+    Set-StepState 'alerts' 'skipped' -Detail 'Skipped - the console build did not finish'
+} else {
+    Invoke-Native -Name 'alerts' -StepKey 'alerts' -Exe $Python -WorkDir $PSScriptRoot `
+        -NativeArgs @('notify.py', '--config', $AlertsConfig,
+                      '--alerts', (Join-Path $OutputRoot 'alerts.json'),
+                      '--state', (Join-Path $OutputRoot 'alerts-state.json'))
+}
 
 # --------------------------------------------------------------------------- #
 # Summary

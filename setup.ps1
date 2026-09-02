@@ -302,6 +302,12 @@ if ((Test-Path (Join-Path $pfd 'config.example.ini')) -and -not (Test-Path (Join
     Copy-Item (Join-Path $pfd 'config.example.ini') (Join-Path $pfd 'config.ini')
     Write-Host "  printers are OPTIONAL: to add them later, put their IPs in $((Join-Path $pfd 'config.ini'))"
 }
+# Alerts start with every rule at its default and no channel: nothing is sent
+# until a person pastes a Teams Workflows URL (or a mail relay) into the file.
+if ((Test-Path (Join-Path $consoleDir 'alerts.example.ini')) -and -not (Test-Path (Join-Path $consoleDir 'alerts.ini'))) {
+    Copy-Item (Join-Path $consoleDir 'alerts.example.ini') (Join-Path $consoleDir 'alerts.ini')
+    Write-Host "  alerts are OPTIONAL: to get Teams or email messages, edit $((Join-Path $consoleDir 'alerts.ini'))"
+}
 
 # --------------------------------------------------------------------------- #
 Write-Host ''

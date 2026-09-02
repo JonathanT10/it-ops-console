@@ -81,6 +81,12 @@ change it):
                                                walks you through it; no
                                                password is stored anywhere)
 
+Alerts (optional): the console works out what needs a person on every
+refresh. To have that sent to a Teams channel or an email address, edit
+C:\IT-Ops\tools\it-ops-console\alerts.ini (one yes/no or number per rule),
+then run  python notify.py --test  from that folder. Messages go out only
+when something is new, worse or cleared - plus one weekly summary.
+
 Everything against your tenant is read-only. Nothing stores a password.
 Setup locks the C:\IT-Ops folder to you and Administrators, so the data it
 collects (admin names, stale accounts, the app inventory) is not readable by

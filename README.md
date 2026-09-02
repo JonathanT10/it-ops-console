@@ -66,6 +66,12 @@ that wrote `run-summary.json` is older than the history folder. Conditional
 Access, role assignments, licence purchases, app registrations, and Intune
 policies.
 
+**Alerts** — where alerts go (Teams, email, or nowhere yet), what is firing
+right now with the same next-step line as the other pages, every rule with its
+current setting including the ones turned off, how `alerts.ini` was read
+(a line it could not use is listed, not silently ignored), and the last
+messages sent. See *Alerts* below.
+
 ## Posture over time
 
 A snapshot tells you where you are; a series tells you where you're heading.
@@ -194,6 +200,72 @@ with the Task Scheduler job's last result. The choice itself lives in
 `tools\it-ops-console\automatic-refresh.ini` — schedule, two IDs, a
 thumbprint; nothing secret — and survives updates like every other `.ini`.
 
+### Alerts — Teams or email, only when something changes
+
+Every refresh already works out what needs a human. Alerts send that to a
+Teams channel and/or an email address, and they are built so nobody learns to
+ignore them: by default a message goes out **only when an alert is new, has
+got worse, or has cleared** since the last message, grouped by tab, each line
+carrying the same plain-English next step the console shows. A weekly summary
+(Mondays unless you change it) lists everything still open, or says "nothing
+open" — a heartbeat that also proves the refresh is running.
+
+**Turning it on.** Setup writes `tools\it-ops-console\alerts.ini` with every
+rule at its default and no channel. Paste your channel's Workflows URL under
+`[teams]` (in Teams: channel → ⋯ → Workflows → "Post to a channel when a
+webhook request is received"), or fill in `[email]` with your internal relay,
+then prove it from the console folder:
+
+```
+python notify.py --test
+```
+
+**What is watched** is one line per rule, one section per tab — a yes/no or a
+number where 0 means off — and `notify = no` at the top of a section silences
+that whole tab without touching its rules:
+
+```ini
+[security]
+notify = yes
+admin_without_mfa = yes        ; any admin with no MFA method registered
+mfa_coverage_below = 90        ; percent
+stale_accounts_above = 20
+legacy_auth_signins = yes
+```
+
+The full list with a sentence on each rule is [`alerts.example.ini`](alerts.example.ini);
+the console's **Alerts** page shows the same list with the settings in force, what
+is firing, and any line it could not read. Identity: critical and warning CA
+gaps, expired and expiring app credentials. Security: admins without MFA, MFA
+coverage, stale accounts, legacy authentication. Licensing: disabled accounts
+still licensed, unassigned seats, unused-seat cost. Print fleet: offline, error,
+low supplies. What changed: Conditional Access, role grants, app registrations,
+licence counts, Intune (each change reported once). Refresh: could not sign in,
+a collector failed, certificate expiring, data older than N days.
+
+**How it is built.** `console/alerts.py` is a catalog: one entry per rule (tab,
+label, on/off or threshold, default, severity, evaluate) that yields alerts with
+a stable key. `build.py` runs it on every build and writes `output\alerts.json`
+— the renderer still sends nothing and holds no credentials. `notify.py` is the
+one thing in this repository that talks to the network, and only to your webhook
+and your relay: it compares `alerts.json` with `output\alerts-state.json` (what
+people were already told), decides, sends, and records. `run-all.ps1` runs it as
+its last step and skips it in words when no channel is configured. Adding a rule
+is one catalog entry; `alerts.example.ini` is generated from the catalog and a
+test fails if the two drift. Adding a channel is one function.
+
+**Security.** The Workflows URL lets anyone holding it post into that channel,
+so it lives in `alerts.ini` under the folder lock (you, Administrators, SYSTEM);
+set `ITOPS_TEAMS_WEBHOOK` in the environment instead if you would rather keep it
+out of a file. Email is relay-only by design — there are no username or password
+fields anywhere here, so a relay that requires a login is out of scope. Alert text
+carries admin names and UPNs, the same as the console; pick a channel whose
+members should see that. Names are neutralised so a hostile display name cannot
+become a link in a card.
+
+Running entra-tenant-docs on its own? Its `Send-TenantDocsAlert.ps1` still works
+as before; the suite's alerts cover the same ground and more.
+
 **If something goes wrong:** run [`check-setup.ps1`](check-setup.ps1)
 (right-click → Run with PowerShell). It is read-only, says in plain words what
 is missing and what to do about each thing, and writes `check-setup.log` for
@@ -305,7 +377,8 @@ on that subfolder yourself; the default assumes the console stays local.
 ## Design notes
 
 **The console is a renderer, nothing more.** It has no credentials, no network
-calls, and no scheduler. That boundary is deliberate: collection is where the
+calls, and no scheduler (`notify.py`, the alert sender, is a separate program
+run after the build, and is the only thing here that sends anything). That boundary is deliberate: collection is where the
 permissions, the rate limits, and the failure modes live, and keeping it out of
 the renderer means the console cannot be the reason a run failed. It also means
 you can rebuild the site from yesterday's JSON to see exactly what it looked
@@ -329,21 +402,30 @@ last week's build against today's shows you real drift and not churn.
 
 ```
 python tests/test_console.py
+python tests/test_notify.py
 pwsh tests/test_run_all_signin.ps1
 pwsh tests/test_schedule_refresh.ps1
 ```
 
-The Python suite (134 checks) covers freshness classification, timestamp
+`test_console.py` (204 checks) covers freshness classification, timestamp
 parsing, feed degradation (corrupt JSON, missing files, unconfigured sources),
 every model, change detection, rendering with zero feeds configured, HTML
-escaping of hostile input, the automatic-refresh footer note and banners, and a
-full sample build. The two PowerShell suites drive `run-all.ps1` and
-`schedule-refresh.ps1` against stub collectors, a stub Graph module, and stub
-Task Scheduler and certificate cmdlets: every rung of the sign-in ladder made
-to succeed, fail, or hang; the sign-out rule; what Task Scheduler is asked to
-register and as whom; the proof-before-scheduling rule; and that the
-certificate a person uploads is the one kept. Nothing in either touches
-Microsoft 365 or Windows.
+escaping of hostile input, the automatic-refresh footer note and banners, the
+alert catalog (every rule fires and stays quiet on the right data, thresholds
+and silenced tabs honoured, `alerts.example.ini` identical to what the catalog
+renders, unusable lines reported), alert state (new / worse / cleared / told),
+the Alerts page, and a full sample build. `test_notify.py` (34 checks) runs
+`notify.py` against a local fake webhook and a local fake mail relay: first run
+tells everything, a repeat stays quiet, new and worse speak, cleared is said
+once, events are never "cleared", the weekly digest fires on its day, a failed
+post leaves alerts untold so they are retried, `--test` and `--dry-run`. The two
+PowerShell suites drive `run-all.ps1` and `schedule-refresh.ps1` against stub
+collectors, a stub Graph module, and stub Task Scheduler and certificate
+cmdlets: every rung of the sign-in ladder made to succeed, fail, or hang; the
+sign-out rule; the alerts step skipped in words, sending to a local webhook,
+and failing in plain words; what Task Scheduler is asked to register and as
+whom; the proof-before-scheduling rule; and that the certificate a person
+uploads is the one kept. Nothing in any of them touches Microsoft 365 or Windows.
 
 ## Licence
 

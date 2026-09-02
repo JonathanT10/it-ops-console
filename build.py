@@ -16,15 +16,17 @@ month's numbers is worse than no console.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
 from datetime import datetime, timezone
 
+from console import alerts as alert_rules
 from console import model, pages
 from console import render
 from console.render import write_page
-from console.sources import load_all
+from console.sources import base_dir, load_all
 
 
 def main():
@@ -38,6 +40,9 @@ def main():
                     help="build from the bundled sample data - no real feeds needed")
     ap.add_argument("--open-path", action="store_true",
                     help="print the absolute path of the built overview page")
+    ap.add_argument("--alerts-out", default=None,
+                    help="where to write alerts.json (default: base_path\\alerts.json; "
+                         "not written for --sample)")
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -68,6 +73,32 @@ def main():
     models["refresh"] = model.refresh_model(feeds.get("refresh_status"))
     render.REFRESH_NOTE = models["refresh"]["note"] if models["refresh"] else ""
 
+    # Alerts: run the rule catalog against alerts.ini (beside sources.ini) and
+    # write alerts.json for notify.py. This build never sends anything - that
+    # is notify.py's job, run by run-all as its own step afterwards.
+    cfg_dir = os.path.dirname(os.path.abspath(config))
+    base = base_dir(cfg, config)
+    acfg = alert_rules.load_config(os.path.join(cfg_dir, "alerts.ini"))
+    fired = alert_rules.evaluate(acfg, models, feeds)
+    channels = alert_rules.channels_configured(acfg)
+    alerts_out = args.alerts_out or (None if args.sample else os.path.join(base, "alerts.json"))
+    if alerts_out:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(alerts_out)), exist_ok=True)
+            with open(alerts_out, "w", encoding="utf-8") as fh:
+                json.dump(alert_rules.alerts_document(fired, acfg), fh, indent=2)
+        except OSError as e:
+            print("WARNING: could not write %s (%s) - alerts will not be sent this run." % (alerts_out, e))
+    state_path = os.path.join(os.path.dirname(os.path.abspath(alerts_out)) if alerts_out else base, "alerts-state.json")
+    astate = None
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8-sig") as fh:
+                astate = json.load(fh)
+        except (OSError, ValueError):
+            astate = None
+    models["alerts"] = pages.alerts_page_model(fired, acfg, astate, channels)
+
     available = {
         "index": True,
         "identity": models["identity"] is not None,
@@ -75,6 +106,7 @@ def main():
         "licensing": models["licensing"] is not None,
         "fleet": models["fleet"] is not None,
         "changes": models["changes"] is not None,
+        "alerts": True,
     }
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -99,6 +131,8 @@ def main():
         write_page(args.out, "changes",
                          pages.build_changes(models["changes"], feeds["history"],
                                              available, generated)),
+        write_page(args.out, "alerts",
+                         pages.build_alerts(models["alerts"], available, generated)),
     ]
 
     print("")
