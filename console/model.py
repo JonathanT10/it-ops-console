@@ -174,6 +174,9 @@ def fleet_model(feed):
         rows.append({
             "name": dev.get("name") or dev.get("ip"),
             "ip": dev.get("ip"),
+            # Set when a scan of a configured place found this printer, rather
+            # than someone typing it into the collector's config.
+            "discovered_from": dev.get("discovered_from"),
             "model": dev.get("model"),
             "serial": dev.get("serial"),
             "status": status,
@@ -546,4 +549,43 @@ def refresh_model(feed):
         "when": when,
         "note": note,
         "banners": banners,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Where we look for printers (the collector's fleet-discovery.json)
+# --------------------------------------------------------------------------- #
+
+def discovery_model(feed):
+    """The places the printer collector looks, what each one found, and
+    anything it could not scan. None when discovery has never run - which is
+    the normal state until someone names a place to look."""
+    if feed is None or not feed.ok:
+        return None
+    d = feed.data or {}
+    places = []
+    for r in _list(d.get("Ranges")):
+        last = parse_ts(r.get("LastScanUtc"))
+        places.append({
+            "name": r.get("Name") or "",
+            "spec": r.get("Spec") or "",
+            "addresses": r.get("Addresses") or 0,
+            "found": r.get("Found") or 0,
+            "last_scan": last,
+            "last_scan_text": _when_text(last) if last else "not looked at yet",
+            "problem": r.get("Problem") or "",
+        })
+    found = [{"ip": f.get("Ip"), "name": f.get("Name"), "range": f.get("Range")}
+             for f in _list(d.get("FoundThisScan"))]
+    return {
+        "places": places,
+        "ignored": _list(d.get("Ignored")),
+        "rescan_hours": d.get("RescanHours"),
+        "max_addresses": d.get("MaxAddresses") or 1024,
+        "scanned_this_run": bool(d.get("ScannedThisRun")),
+        "last_scan": parse_ts(d.get("LastScanUtc")),
+        "found_this_scan": found,
+        "non_printers": d.get("NonPrinters") or 0,
+        "problems": [str(p) for p in _list(d.get("Problems"))],
+        "addresses_total": sum(p["addresses"] for p in places),
     }

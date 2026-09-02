@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from . import alerts as alert_rules
 from .actions import CA_GAP_ACTION, next_step  # noqa: F401 - re-exported for callers and tests
 from .render import (ICONS, bar_rows, badge, delta_badge, esc, fmt_metric, freshness_chip,
@@ -582,13 +584,103 @@ def build_licensing(m, feed, available, generated, trend=None):
 # Print fleet
 # --------------------------------------------------------------------------- #
 
-def build_fleet(m, feed, available, generated):
+BLANK_PLACE_ROWS = 2
+
+
+def _place_rows(discovery):
+    """One row per place to look, plus a couple of empty ones to fill in."""
+    places = list((discovery or {}).get("places") or [])
+    rows = []
+    for p in places:
+        info = []
+        if p["addresses"]:
+            info.append("%s address%s" % (format(p["addresses"], ","),
+                                          "" if p["addresses"] == 1 else "es"))
+        if p["last_scan"]:
+            info.append("%d found" % p["found"])
+            info.append("looked %s" % p["last_scan_text"])
+        else:
+            info.append("not looked at yet")
+        rows.append((p["name"], p["spec"], " &middot; ".join(esc(i) for i in info), p["problem"]))
+    for _ in range(BLANK_PLACE_ROWS):
+        rows.append(("", "", "", ""))
+    html = []
+    for name, spec, info, problem in rows:
+        html.append(
+            '<div class="row">'
+            '<input type="text" data-row="name" value="%s" placeholder="a name for this place" aria-label="name">'
+            '<input type="text" data-row="value" data-check="place" value="%s" '
+            'placeholder="10.0.10.0/24" aria-label="address, range or subnet">'
+            '<span class="rowmsg">%s</span><span class="rowinfo">%s</span></div>'
+            % (esc(name), esc(spec), esc(problem), info))
+    return '<div class="rows" data-rowsec="ranges">%s</div>' % "".join(html)
+
+
+def _where_we_look(discovery):
+    d = discovery or {}
+    hours = d.get("rescan_hours")
+    hours = 24 if hours is None else hours
+    ignored = "; ".join(d.get("ignored") or [])
+
+    lead = ('Name a subnet, a span or a single address and the next refresh looks there for '
+            'printers you have not listed. Anything that answers as a printer is added and '
+            'polled from then on; a switch that merely speaks SNMP is passed over.')
+    banner = ""
+    if d.get("problems"):
+        banner = ('<div class="banner warning" role="status">%s<div>%s</div></div>'
+                  % (ICONS["warn"], "".join(
+                      "<div>%s</div>" % esc(p) for p in d["problems"])))
+    found = d.get("found_this_scan") or []
+    found_html = ""
+    if found:
+        found_html = ('<p class="note">The last look found %d: %s.</p>'
+                      % (len(found), ", ".join("%s (%s)" % (esc(f["name"]), esc(f["ip"]))
+                                               for f in found[:6])))
+    controls = (
+        '<div class="kv sendctl">'
+        '<span class="k">Look again every</span><span>'
+        '<input type="number" class="num" min="0" step="1" data-sec="discovery" '
+        'data-key="rescan_hours" value="%s"><span class="unit">hours</span> '
+        '<span class="help">0 means only when you ask. A new place is always looked at once.</span>'
+        '</span>'
+        '<span class="k">Leave alone</span><span>'
+        '<input type="text" class="wide" data-sec="discovery" data-key="ignore" value="%s" '
+        'placeholder="10.0.10.99; 10.0.10.100"> '
+        '<span class="help">addresses to skip even if a look finds them</span></span>'
+        '</div>' % (esc(_numtxt(hours)), esc(ignored)))
+
+    savebox = (
+        '<div class="savebox">'
+        '<button type="button" id="save-btn" class="btn">Save settings</button>'
+        '<span id="save-msg" class="savemsg"></span>'
+        '<p class="note">This is exactly what gets applied. Your SNMP community and the '
+        'printers you listed by hand are not in it and are never changed from this page.</p>'
+        '<textarea id="settings-text" rows="8" readonly spellcheck="false"></textarea>'
+        '</div>'
+        '<noscript><p class="note">This page needs JavaScript to build the settings for you. '
+        'Without it, edit the [ranges] section of print-fleet-dashboard\'s config.ini.</p></noscript>')
+
+    note = ('<p class="note">%s Then click <b>Save settings</b> and double-click '
+            '<b>Apply Settings</b> on your desktop - nothing changes until you do both.</p>'
+            '<p class="note">This is a scan: one SNMP request goes to every address in every '
+            'place named here. That is ordinary traffic on a network you run, but on some '
+            'networks it shows up in monitoring. A place larger than %s addresses is refused '
+            'rather than attempted.</p>' % (lead, format(d.get("max_addresses") or 1024, ",")))
+
+    return ('<section><h2>Where we look</h2>%s%s%s%s'
+            '<button type="button" class="btn small" data-addrow="ranges">+ add a place</button>'
+            '%s%s</section>'
+            % (note, banner, found_html, _place_rows(discovery), controls, savebox))
+
+
+def build_fleet(m, feed, available, generated, discovery=None):
     if not m:
+        empty = _feed_empty("Print fleet", feed,
+                            "Printers are optional. To turn this on, name a place to look "
+                            "below - or put their IPs in print-fleet-dashboard's config.ini. "
+                            "The next Refresh picks them up automatically.")
         return shell("Print fleet", "fleet", available,
-                     _feed_empty("Print fleet", feed,
-                                 "Printers are optional. To turn this on, put their IPs in "
-                                 "print-fleet-dashboard's config.ini - the next Refresh picks "
-                                 "them up automatically."), generated)
+                     empty + _where_we_look(discovery) + editor_script(), generated)
     cards = _cards([
         {"k": "Devices online", "v": "%d/%d" % (m["online"], m["total"])},
         {"k": "Need attention", "v": len(m["attention"])},
@@ -629,7 +721,8 @@ def build_fleet(m, feed, available, generated):
                 % _table(["Device", "Status", "Supplies", "14-day volume", "#Lifetime pages"],
                          dev_rows))
 
-    body = freshness_chip(feed.state, feed.age, "Last poll") + cards + att_html + dev_html
+    body = (freshness_chip(feed.state, feed.age, "Last poll") + cards + att_html + dev_html
+            + _where_we_look(discovery) + editor_script())
     return shell("Print fleet", "fleet", available, body, generated,
                  subtitle="Which printers need a human today")
 
@@ -693,7 +786,14 @@ def build_changes(m, feed, available, generated):
 # Alerts
 # --------------------------------------------------------------------------- #
 
-ALERTS_JS = r"""
+def editor_script():
+    """The one script any console page carries, with the shape of a "place to
+    look" injected from the same definition Python checks."""
+    return ('<script>var PLACE_PATTERN = %s;%s</script>'
+            % (json.dumps(alert_rules.PLACE_PATTERN).replace("</", "<\\/"), EDITOR_JS))
+
+
+EDITOR_JS = r"""
 /* The console is a renderer: this is the one page with any script, and all it
    does is turn the controls above into TEXT for you to copy. It talks to
    nothing, stores nothing, and never sees where your alerts go. */
@@ -710,24 +810,88 @@ ALERTS_JS = r"""
     if (kind === 'number' && v === '') { return '0'; }
     return v;
   }
+  /* A place to look is an address, a range or a subnet. This is the same
+     pattern the console checks in Python and the printer tool checks for
+     real - one definition, injected here, so they cannot drift. */
+  var PLACE = new RegExp(PLACE_PATTERN);
+  function isPlace(text) {
+    var m = PLACE.exec(String(text || '').trim());
+    if (!m) { return false; }
+    var parts = [m[1]];
+    if (m[3] && m[3].indexOf('.') >= 0) { parts.push(m[3]); }
+    for (var i = 0; i < parts.length; i++) {
+      var octets = parts[i].split('.');
+      for (var j = 0; j < octets.length; j++) {
+        if (parseInt(octets[j], 10) > 255) { return false; }
+      }
+    }
+    if (m[2] !== undefined && m[2] !== '' && parseInt(m[2], 10) > 32) { return false; }
+    if (m[3] !== undefined && m[3] !== '' && m[3].indexOf('.') < 0
+        && parseInt(m[3], 10) > 255) { return false; }
+    return true;
+  }
+  function checkRow(nameEl, valueEl, msgEl) {
+    var name = (nameEl.value || '').trim(), value = (valueEl.value || '').trim();
+    /* The row may have arrived with something the LAST scan reported - "that
+       range is too big to scan". Remember it, so typing does not silently
+       throw away the one message that says why a place found nothing, and
+       editing the value does clear it (it no longer applies). */
+    if (msgEl && msgEl.getAttribute('data-was') === null) {
+      msgEl.setAttribute('data-was', msgEl.textContent);
+      valueEl.setAttribute('data-was', valueEl.value);
+    }
+    var bad = '';
+    if (value && !isPlace(value)) {
+      bad = 'not an address, range or subnet';
+    } else if (value && !name) {
+      bad = 'give it a name';
+    }
+    if (msgEl) {
+      msgEl.textContent = bad || (valueEl.value === valueEl.getAttribute('data-was')
+                                  ? msgEl.getAttribute('data-was') : '');
+    }
+    return !bad;
+  }
   function build() {
-    var els = document.querySelectorAll('[data-sec]');
     var order = [], bySection = {};
+    function add(sec, line) {
+      if (!bySection[sec]) { bySection[sec] = []; order.push(sec); }
+      bySection[sec].push(line);
+    }
+    var els = document.querySelectorAll('[data-sec], [data-rowsec]');
     for (var i = 0; i < els.length; i++) {
       var el = els[i];
+      if (el.hasAttribute('data-rowsec')) {
+        /* Rows a person names: "Office = 10.0.10.0/24". A blank row is not a
+           row; a row with a problem is still written out, so applying it says
+           what is wrong rather than silently dropping it. */
+        var sec = el.getAttribute('data-rowsec');
+        var rows = el.querySelectorAll('.row');
+        var any = false;
+        for (var r = 0; r < rows.length; r++) {
+          var nameEl = rows[r].querySelector('[data-row="name"]');
+          var valueEl = rows[r].querySelector('[data-row="value"]');
+          if (!nameEl || !valueEl) { continue; }
+          checkRow(nameEl, valueEl, rows[r].querySelector('.rowmsg'));
+          var name = (nameEl.value || '').trim(), value = (valueEl.value || '').trim();
+          if (!name && !value) { continue; }
+          add(sec, name + ' = ' + value);
+          any = true;
+        }
+        if (!any) { add(sec, ''); }   /* an empty section still means "none" */
+        continue;
+      }
       var v = valueOf(el);
       if (v === null) { continue; }
-      var sec = el.getAttribute('data-sec');
-      if (!bySection[sec]) { bySection[sec] = []; order.push(sec); }
-      bySection[sec].push(el.getAttribute('data-key') + ' = ' + v);
+      add(el.getAttribute('data-sec'), el.getAttribute('data-key') + ' = ' + v);
     }
-    var lines = ['# IT Ops Console alert settings, made in the console.',
-                 '# Double-click "Apply Alert Settings" on your desktop to use them.',
-                 '# Your Teams and email settings, and any notes in alerts.ini, are kept.',
+    var lines = ['# IT Ops Console settings, made in the console.',
+                 '# Double-click "Apply Settings" on your desktop to use them.',
+                 '# Only what is below changes; the rest of your settings files is kept.',
                  ''];
     for (var j = 0; j < order.length; j++) {
       lines.push('[' + order[j] + ']');
-      lines = lines.concat(bySection[order[j]]);
+      lines = lines.concat(bySection[order[j]].filter(function (l) { return l !== ''; }));
       lines.push('');
     }
     out.value = lines.join('\n');
@@ -735,6 +899,25 @@ ALERTS_JS = r"""
   }
   document.addEventListener('change', build);
   document.addEventListener('input', build);
+  /* "+ add a place": clone the last row, empty it, and hand over the cursor. */
+  var adders = document.querySelectorAll('[data-addrow]');
+  for (var a = 0; a < adders.length; a++) {
+    adders[a].addEventListener('click', function (ev) {
+      var host = document.querySelector('[data-rowsec="' + ev.target.getAttribute('data-addrow') + '"]');
+      if (!host) { return; }
+      var rows = host.querySelectorAll('.row');
+      var fresh = rows[rows.length - 1].cloneNode(true);
+      var inputs = fresh.querySelectorAll('input');
+      for (var i = 0; i < inputs.length; i++) { inputs[i].value = ''; }
+      var info = fresh.querySelector('.rowinfo'); if (info) { info.textContent = ''; }
+      var msg = fresh.querySelector('.rowmsg');
+      if (msg) { msg.textContent = ''; msg.removeAttribute('data-was'); }
+      for (var c = 0; c < inputs.length; c++) { inputs[c].removeAttribute('data-was'); }
+      host.appendChild(fresh);
+      var first = fresh.querySelector('input'); if (first) { first.focus(); }
+      build();
+    });
+  }
   btn.addEventListener('click', function () {
     var copied = false;
     try { out.focus(); out.select(); copied = document.execCommand('copy'); } catch (e) { copied = false; }
@@ -743,7 +926,7 @@ ALERTS_JS = r"""
       var blob = new Blob([out.value], { type: 'text/plain' });
       var a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'alert-settings.txt';
+      a.download = 'it-ops-settings.txt';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -751,8 +934,8 @@ ALERTS_JS = r"""
     } catch (e) { saved = false; }
     var where = saved ? ' A copy is in your Downloads folder.' : '';
     msg.textContent = copied
-      ? 'Copied. Now double-click "Apply Alert Settings" on your desktop.' + where
-      : 'Select the text below and press Ctrl+C, then double-click "Apply Alert Settings" on your desktop.' + where;
+      ? 'Copied. Now double-click "Apply Settings" on your desktop.' + where
+      : 'Select the text below and press Ctrl+C, then double-click "Apply Settings" on your desktop.' + where;
   });
   build();
 })();
@@ -937,7 +1120,7 @@ def build_alerts(am, available, generated):
                '<b>Needs a human</b> on the overview, and what is worth a message. Turning one off '
                'takes it off both - the domain page itself still shows everything. Tick, untick, or '
                'change a number - 0 means off; the box beside a tab name silences that whole tab at '
-               'once. Then click <b>Save settings</b> and double-click <b>Apply Alert Settings</b> on '
+               'once. Then click <b>Save settings</b> and double-click <b>Apply Settings</b> on '
                'your desktop. Nothing here changes until you do both.</p>%s%s%s</section>'
                % (send_ctl, "".join(tables), savebox))
 
@@ -962,6 +1145,6 @@ def build_alerts(am, available, generated):
             % (esc(str(h.get("when", ""))[:10]), esc(h.get("title", "")),
                esc(", ".join(h.get("channels") or []) or "sent")) for h in am["history"]))
 
-    body = where_html + firing + watched + read + hist_html + ("<script>%s</script>" % ALERTS_JS)
+    body = where_html + firing + watched + read + hist_html + editor_script()
     return shell("Alerts", "alerts", available, body, generated,
                  subtitle="What this console tells you about, where, and what is firing right now.")

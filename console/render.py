@@ -145,6 +145,15 @@ input.wide { width: 320px; max-width: 100%; }
 .btn:hover { background: var(--accent); }
 .savebox { margin-top: 20px; }
 .savemsg { margin-left: 10px; font-size: 13px; color: var(--ink-2); }
+.rows { margin: 6px 0 10px; }
+.row { display: flex; gap: 10px; align-items: center; padding: 2px 0; flex-wrap: wrap; }
+.row input[data-row="name"] { width: 200px; }
+.row input[data-row="value"] { width: 200px; font-variant-numeric: tabular-nums; }
+.rowmsg { color: var(--critical); font-size: 12px; }
+.rowinfo { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.btn.small { padding: 5px 11px; font-size: 12.5px; background: transparent;
+  color: var(--accent-deep); border: 1px solid var(--border); }
+.btn.small:hover { background: var(--surface); color: var(--ink); }
 .savebox textarea { width: 100%; margin-top: 4px; padding: 8px; color: var(--ink);
   background: var(--page); border: 1px solid var(--border); border-radius: 6px;
   font: 12px/1.5 ui-monospace, Consolas, "Courier New", monospace; }

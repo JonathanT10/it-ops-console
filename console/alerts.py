@@ -282,6 +282,36 @@ def ev_supply_below_percent(ctx, rule, value):
     return out
 
 
+def _discovery(ctx):
+    f = ctx.feeds.get("fleet_discovery")
+    return (f.data or {}) if (f is not None and f.ok) else None
+
+
+def ev_new_printer_found(ctx, rule, value):
+    """Told once per printer, so a scan that worked says so out loud."""
+    d = _discovery(ctx)
+    if not d:
+        return []
+    out = []
+    for f in d.get("FoundThisScan") or []:
+        ip = f.get("Ip") or ""
+        out.append(_alert(rule, "%s/%s" % (d.get("LastScanUtc") or "", ip),
+                          "New printer found: %s" % (f.get("Name") or ip),
+                          "%s, looking in %s" % (ip, f.get("Range") or "a configured place"),
+                          next_step("new-printer"), transient=True))
+    return out
+
+
+def ev_discovery_problem(ctx, rule, value):
+    """A place to look that could not be scanned is worse than no place at
+    all: it looks like it is working and finds nothing."""
+    d = _discovery(ctx)
+    if not d:
+        return []
+    return [_alert(rule, str(p)[:60], "Cannot look for printers there", str(p),
+                   next_step("discovery-problem")) for p in (d.get("Problems") or [])]
+
+
 # --------------------------------------------------------------------------- #
 # What changed (events, not states: reported once, never "cleared")
 # --------------------------------------------------------------------------- #
@@ -434,6 +464,10 @@ CATALOG = [
          ev_device_error, help="Jam, door open, out of toner - whatever its panel says."),
     Rule("supply_below_percent", "fleet", "A toner or drum falls below", "number", 10, "info",
          ev_supply_below_percent, unit="%", help="Per supply, per printer. 0 turns it off."),
+    Rule("new_printer_found", "fleet", "A new printer was found", "switch", True, "info",
+         ev_new_printer_found, help="A scan of the places you named turned up a printer you had not listed. Said once."),
+    Rule("discovery_problem", "fleet", "A place to look could not be scanned", "switch", True, "warning",
+         ev_discovery_problem, help="A range with a typo, or one too big to scan, finds nothing while looking like it works."),
     # changes
     Rule("conditional_access", "changes", "A Conditional Access policy was added, removed or changed", "switch", True, "warning",
          ev_changes_ca, help="Reported once, when it appears in the change log."),
@@ -859,7 +893,41 @@ def render_example_ini():
 
 CHANNEL_SECTIONS = ("teams", "email")
 CASE_SENSITIVE_KEYS = {("send", "console_link")}
+# Sections that belong to the PRINTER collector's config.ini rather than
+# alerts.ini. The console's Print fleet tab produces these; apply-settings.py
+# routes them by name, so one settings block can carry both kinds.
+FLEET_SECTIONS = ("ranges", "discovery")
+FLEET_DISCOVERY_KEYS = ("rescan_hours", "ignore")
+# [ranges] rows are named by a person, so the section is REPLACED wholesale -
+# that is what lets a row be deleted. Everything else merges key by key.
+REPLACE_WHOLE = ("ranges",)
 EDITABLE_SECTIONS = ("send",) + tuple(t for t, _ in TABS)
+
+
+# What a "place to look for printers" may look like. The printer collector's
+# iprange.py is the authority on what one MEANS (and on how big is too big);
+# this is the SHAPE, checked here and - as the very same pattern - in the
+# browser while you type, so one definition serves both.
+PLACE_PATTERN = (r"^(\d{1,3}(?:\.\d{1,3}){3})"      # an address
+                 r"(?:/(\d{1,2})|-(\d{1,3}(?:\.\d{1,3}){3}|\d{1,3}))?$")   # /prefix or -end
+
+
+def looks_like_a_place(spec):
+    """True if `spec` is shaped like an address, a range or a subnet."""
+    m = re.match(PLACE_PATTERN, str(spec or "").strip())
+    if not m:
+        return False
+    parts = [m.group(1)]
+    if m.group(3) and "." in m.group(3):
+        parts.append(m.group(3))
+    for addr in parts:
+        if any(int(o) > 255 for o in addr.split(".")):
+            return False
+    if m.group(2) is not None and int(m.group(2)) > 32:
+        return False
+    if m.group(3) is not None and "." not in m.group(3) and int(m.group(3)) > 255:
+        return False
+    return True
 
 
 def _split_value(raw):
@@ -873,13 +941,13 @@ def _split_value(raw):
 
 
 def parse_settings_fragment(text):
-    """Read the block the Alerts page produces.
+    """Read a settings block the console produced.
 
-    Returns (settings, notes): settings is {section: {key: value}} in the order
-    they appeared; notes are plain sentences about anything skipped. Raises
-    ValueError when the text holds nothing this console recognises - which is
-    how "Apply Alert Settings" tells settings apart from whatever else happens
-    to be on the clipboard.
+    Returns (alerts, fleet, notes): two lists of (section, {key: value}) in the
+    order they appeared - one for alerts.ini, one for the printer collector's
+    config.ini - and plain sentences about anything skipped. Raises ValueError
+    when the text holds nothing this console recognises, which is how "Apply
+    Settings" tells settings apart from whatever else is on the clipboard.
     """
     settings, notes, order = {}, [], []
     section = None
@@ -892,17 +960,43 @@ def parse_settings_fragment(text):
             section = line[1:-1].strip().lower()
             if section in CHANNEL_SECTIONS:
                 notes.append("Left your [%s] settings alone - the console never changes where alerts go." % section)
-            elif section not in EDITABLE_SECTIONS:
+            elif section not in EDITABLE_SECTIONS and section not in FLEET_SECTIONS:
                 notes.append("Ignored [%s]: not a section this console knows." % section)
             continue
-        if section is None or section in CHANNEL_SECTIONS or section not in EDITABLE_SECTIONS:
+        if section is None or section in CHANNEL_SECTIONS:
+            continue
+        if section not in EDITABLE_SECTIONS and section not in FLEET_SECTIONS:
             continue
         eq = line.find("=")
         if eq < 1:
             continue
-        key = line[:eq].strip().lower()
+        raw_key = line[:eq].strip()
+        # A [ranges] key is a display name someone typed - "Front Office" must
+        # stay "Front Office". Everywhere else keys are settings, and case is
+        # noise.
+        key = raw_key if section == "ranges" else raw_key.lower()
         value, _ = _split_value(line[eq + 1:])
-        if section == "send":
+        if section == "ranges":
+            # A person names these rows, so any key is fine - the VALUE is what
+            # has to make sense, and a typo here would otherwise scan nothing.
+            if not looks_like_a_place(value):
+                raise ValueError("'%s' (%s) is not an address, a range or a subnet. "
+                                 "Try 10.0.10.0/24, 10.0.20.50-99, or 10.0.30.15."
+                                 % (value, raw_key))
+        elif section == "discovery":
+            if key not in FLEET_DISCOVERY_KEYS:
+                notes.append("Ignored [discovery] %s: not a setting this console knows." % key)
+                continue
+            if key == "ignore":
+                for one in [p.strip() for p in value.replace(",", ";").split(";") if p.strip()]:
+                    if not looks_like_a_place(one):
+                        raise ValueError("'%s' in the ignore list is not an address." % one)
+            elif key == "rescan_hours":
+                try:
+                    float(value or 0)
+                except ValueError:
+                    raise ValueError("'%s' is not a number of hours." % value)
+        elif section == "send":
             if key not in SEND_KEYS:
                 notes.append("Ignored [send] %s: not a setting this console knows." % key)
                 continue
@@ -918,8 +1012,10 @@ def parse_settings_fragment(text):
         settings[section][key] = value
         recognised += 1
     if not recognised:
-        raise ValueError("that does not look like alert settings")
-    return [(s, settings[s]) for s in order], notes
+        raise ValueError("that does not look like settings from the console")
+    alerts = [(s, settings[s]) for s in order if s in EDITABLE_SECTIONS]
+    fleet = [(s, settings[s]) for s in order if s in FLEET_SECTIONS]
+    return alerts, fleet, notes
 
 
 def _ini_index(lines):
@@ -996,6 +1092,82 @@ def merge_into_ini(target_text, settings):
     if not text.endswith("\n"):
         text += "\n"
     return text, changes
+
+
+def replace_section_in_ini(target_text, section, pairs):
+    """Rewrite one section's keys, keeping its explanatory comments.
+
+    Used for [ranges], where the rows are named by a person: merging can add
+    and change rows but never delete one, and deleting a place you no longer
+    want scanned has to work. The comment block right under the section header
+    is kept (that is where config.example.ini explains the section); notes
+    tangled among the old rows go with them.
+    """
+    lines = str(target_text).splitlines()
+    per_line, _last = _ini_index(lines)
+    body = [i for i, sec in enumerate(per_line) if sec == section]
+    new_rows = ["%s = %s" % (k, v) for k, v in pairs]
+
+    if not body:
+        out = list(lines)
+        if out and out[-1].strip():
+            out.append("")
+        out.append("[%s]" % section)
+        out.extend(new_rows)
+        text = "\n".join(out)
+        return (text if text.endswith("\n") else text + "\n"), [("", r) for r in new_rows]
+
+    start, end = body[0], body[-1]
+    # The blank line that separated this section from the next one belongs to
+    # this section's span, so put back as many as were there - otherwise every
+    # apply glues [ranges] onto the section below it.
+    trailing = 0
+    while end - trailing > start and not lines[end - trailing].strip():
+        trailing += 1
+    header, keep, old_rows = [], [], []
+    seen_key = False
+    for i in range(start, end + 1):
+        stripped = lines[i].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            header.append(lines[i])
+            continue
+        if not seen_key and (not stripped or stripped[0] in ";#"):
+            keep.append(lines[i])
+            continue
+        if stripped and stripped[0] not in ";#" and "=" in stripped:
+            seen_key = True
+            old_rows.append(stripped)
+    while keep and not keep[-1].strip():
+        keep.pop()
+    replacement = header + keep + new_rows + [""] * trailing
+    lines[start:end + 1] = replacement
+    text = "\n".join(lines)
+    if not text.endswith("\n"):
+        text += "\n"
+    before = {r.split("=", 1)[0].strip(): _split_value(r.split("=", 1)[1])[0] for r in old_rows}
+    after = dict(pairs)
+    changes = []
+    for k, v in after.items():
+        if k not in before:
+            changes.append(("added", "%s = %s" % (k, v)))
+        elif before[k] != v:
+            changes.append(("changed", "%s = %s (was %s)" % (k, v, before[k])))
+    for k in before:
+        if k not in after:
+            changes.append(("removed", "%s = %s" % (k, before[k])))
+    return text, changes
+
+
+def describe_fleet_changes(section, changes):
+    """Plain sentences for what changed in the printer collector's config."""
+    out = []
+    for kind, text in changes:
+        if section == "ranges":
+            out.append({"added": "Now looking in %s.", "removed": "No longer looking in %s.",
+                        "changed": "Where to look changed: %s."}[kind] % text)
+        else:
+            out.append("%s: %s." % (section, text))
+    return out
 
 
 def describe_changes(changes):

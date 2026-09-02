@@ -86,6 +86,13 @@ def next_step(kind, key=None):
                 "check-setup.ps1 says what is missing.")
     if kind == "certificate":
         return "Re-run setup on that computer and pick unattended refresh again - it makes a new certificate to upload."
+    if kind == "new-printer":
+        return ("Check it is a printer you want tracked, then give it a proper name in the "
+                "printer tool's config.ini - or add its address to the ignore list on the "
+                "Print fleet tab if it should be left alone.")
+    if kind == "discovery-problem":
+        return ("Fix the place to look on the console's Print fleet tab - the message says "
+                "what is wrong with it.")
     if kind == "stale-data":
         return 'Run "Refresh IT Ops Data", or check that the automatic refresh is still scheduled (check-setup.ps1).'
     return ""

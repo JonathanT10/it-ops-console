@@ -136,6 +136,13 @@ def load_licensing(path):
     return d, parse_ts(d.get("GeneratedUtc"))
 
 
+def load_fleet_discovery(path):
+    """print-fleet-dashboard fleet-discovery.json: where the collector looked
+    for printers, when, and what it found."""
+    d = _load_json(path)
+    return d, parse_ts(d.get("GeneratedUtc"))
+
+
 def load_refresh_status(path):
     """it-ops-console run-all.ps1 refresh-status.json: how the last refresh
     signed in, the schedule this machine is on, certificate days left."""
@@ -221,6 +228,8 @@ LOADERS = {
     # domain: the overview turns it into a one-line footer note and, only when
     # something needs a person, a banner.
     "refresh_status":    ("Automatic refresh", load_refresh_status),
+    # Written by the printer collector when config.ini names places to look.
+    "fleet_discovery":   ("Printer discovery", load_fleet_discovery),
 }
 
 
