@@ -1,0 +1,47 @@
+{
+  "GeneratedUtc": "2026-09-02T07:00:41Z",
+  "Ranges": [
+    {
+      "Name": "Office",
+      "Spec": "10.0.10.0/24",
+      "Addresses": 254,
+      "LastScanUtc": "2026-09-02T07:00:41Z",
+      "Found": 3,
+      "Problem": null
+    },
+    {
+      "Name": "Warehouse",
+      "Spec": "10.0.20.50-99",
+      "Addresses": 50,
+      "LastScanUtc": "2026-09-02T07:00:41Z",
+      "Found": 1,
+      "Problem": null
+    },
+    {
+      "Name": "Old VLAN",
+      "Spec": "10.0.0.0/8",
+      "Addresses": 0,
+      "LastScanUtc": "2026-09-02T07:00:41Z",
+      "Found": 0,
+      "Problem": "'10.0.0.0/8' is 16,777,214 addresses, and the limit is 1,024 - scanning that many would take a long time and light up your network monitoring. Use a smaller range."
+    }
+  ],
+  "Ignored": [
+    "10.0.10.99"
+  ],
+  "RescanHours": 24,
+  "MaxAddresses": 1024,
+  "LastScanUtc": "2026-09-02T07:00:41Z",
+  "ScannedThisRun": true,
+  "FoundThisScan": [
+    {
+      "Ip": "10.0.10.34",
+      "Name": "Lobby MFP",
+      "Range": "Office"
+    }
+  ],
+  "NonPrinters": 6,
+  "Problems": [
+    "Old VLAN: '10.0.0.0/8' is 16,777,214 addresses, and the limit is 1,024 - scanning that many would take a long time and light up your network monitoring. Use a smaller range."
+  ]
+}
