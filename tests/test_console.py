@@ -323,6 +323,148 @@ def test_next_steps():
           "powered on and on the network" in fp)
 
 
+def _sec_snap(ts, mfa, admins, stale, guests=10, legacy=None):
+    d = {"GeneratedUtc": ts, "StaleDays": 90,
+         "MfaCoverage": {"CoveragePercent": mfa} if mfa is not None else None,
+         "AdminsWithoutMfa": [{"DisplayName": "a%d" % i} for i in range(admins)],
+         "StaleMembers": [{"DisplayName": "s%d" % i} for i in range(stale)],
+         "RoleSummary": [], "Guests": {"Total": guests}, "NeedsAttention": [],
+         "LegacyAuth": {"Available": legacy is not None,
+                        "Summary": [{"ClientApp": "IMAP4", "SignIns": legacy}] if legacy is not None else []}}
+    return d
+
+
+def _lic_snap(ts, unassigned, reclaim, users=100, costing=None):
+    d = {"GeneratedUtc": ts, "StaleDays": 90, "LicensedUsers": users,
+         "SkuSummary": [{"Sku": "SPB", "Purchased": 200, "Assigned": 200 - unassigned,
+                         "Unassigned": unassigned}],
+         "ConsumptionSkus": [],
+         "ReclaimCandidates": [{"Reason": "DISABLED ACCOUNT", "DisplayName": "d%d" % i}
+                               for i in range(reclaim)]}
+    if costing:
+        d["Costing"] = costing
+    return d
+
+
+def test_trends_model():
+    day = lambda n, h=12: iso(NOW - timedelta(days=n, hours=-h) - timedelta(hours=12))  # noqa: E731
+    # Three days of history plus the current snapshot; day 0 appears TWICE in
+    # history (an early run and a later one) to prove the per-day collapse.
+    hist = Feed("security_history", "Security trend", "h", data=[
+        _sec_snap(day(3), 80.0, 5, 9, legacy=40),
+        _sec_snap(day(2), 85.0, 4, 8, legacy=30),
+        _sec_snap(day(1), 88.0, 4, 6, legacy=20),                          # stale flat from here
+        _sec_snap(iso(NOW - timedelta(hours=6)), 89.0, 4, 6, legacy=12),   # earlier today
+    ], ts=NOW)
+    cur = Feed("security", "Security", "c", data=_sec_snap(iso(NOW), 91.0, 3, 6, legacy=10), ts=NOW)
+    t = model.trends_model(hist, cur, None, None)
+    s = t["security"]
+    check("trends: one point per day, latest wins (4 days from 5 snapshots)", s["points"] == 4)
+    bk = s["by_key"]
+    check("trends: today's point is the later run", bk["mfa_percent"]["current"] == 91.0)
+    check("trends: MFA up reads as good", bk["mfa_percent"]["tone"] == "good"
+          and abs(bk["mfa_percent"]["delta"] - 3.0) < 1e-9)
+    check("trends: admins-without-MFA down reads as good",
+          bk["admins_no_mfa"]["tone"] == "good" and bk["admins_no_mfa"]["delta"] == -1)
+    check("trends: flat metric is muted", bk["stale"]["tone"] == "muted" and bk["stale"]["delta"] == 0)
+    check("trends: neutral metric never judged", bk["guests"]["tone"] == "muted")
+    check("trends: legacy sign-ins summed and trending down",
+          bk["legacy_signins"]["current"] == 10 and bk["legacy_signins"]["tone"] == "good")
+    check("trends: licensing half is None without data", t["licensing"] is None)
+
+    # A metric getting WORSE reads as warning.
+    worse = model.trends_model(
+        Feed("security_history", "Security trend", "h", data=[_sec_snap(day(1), 90.0, 2, 3)], ts=NOW),
+        Feed("security", "Security", "c", data=_sec_snap(iso(NOW), 85.0, 4, 3), ts=NOW), None, None)
+    wb = worse["security"]["by_key"]
+    check("trends: MFA down reads as warning", wb["mfa_percent"]["tone"] == "warning")
+    check("trends: admins up reads as warning", wb["admins_no_mfa"]["tone"] == "warning")
+
+    # A metric absent from older snapshots charts only its trailing run, and a
+    # single point has no delta.
+    partial = model.trends_model(
+        Feed("security_history", "Security trend", "h", data=[
+            _sec_snap(day(2), None, 2, 3), _sec_snap(day(1), 70.0, 2, 3)], ts=NOW),
+        Feed("security", "Security", "c", data=_sec_snap(iso(NOW), 72.0, 2, 3), ts=NOW), None, None)
+    pb = partial["security"]["by_key"]
+    check("trends: metric missing from old snapshots charts its trailing run only",
+          pb["mfa_percent"]["values"] == [70.0, 72.0])
+    single = model.trends_model(None, cur, None, None)
+    check("trends: current alone is one point with no delta",
+          single["security"]["points"] == 1 and single["security"]["by_key"]["mfa_percent"]["delta"] is None)
+
+    # Licensing: dollar metrics ride in only when priced, and carry the currency.
+    cost1 = {"Currency": "$", "HasPrices": True, "UnusedSeatsMonthly": 500.0, "ReclaimableMonthly": 66.0}
+    cost2 = {"Currency": "$", "HasPrices": True, "UnusedSeatsMonthly": 420.0, "ReclaimableMonthly": 33.0}
+    lt = model.trends_model(None, None,
+                            Feed("licensing_history", "Licensing trend", "h",
+                                 data=[_lic_snap(day(1), 20, 3, costing=cost1)], ts=NOW),
+                            Feed("licensing", "Licensing", "c",
+                                 data=_lic_snap(iso(NOW), 16, 2, costing=cost2), ts=NOW))
+    lb = lt["licensing"]["by_key"]
+    check("trends: unused seats down reads as good", lb["unassigned"]["tone"] == "good"
+          and lb["unassigned"]["delta"] == -4)
+    check("trends: dollar metric present with currency and falling",
+          lb["unused_monthly"]["unit"] == "$" and lb["unused_monthly"]["delta"] == -80.0
+          and lb["unused_monthly"]["tone"] == "good")
+    unpriced = model.trends_model(None, None, None,
+                                  Feed("licensing", "Licensing", "c", data=_lic_snap(iso(NOW), 16, 2), ts=NOW))
+    check("trends: no dollar metrics without prices",
+          "unused_monthly" not in unpriced["licensing"]["by_key"])
+
+
+def test_trends_render():
+    avail = {k: True for k in ("index", "identity", "security", "licensing", "fleet", "changes")}
+    gen = "2026-01-01 00:00:00"
+    d1 = iso(NOW - timedelta(days=1)); d0 = iso(NOW)
+    hist = Feed("security_history", "Security trend", "h", data=[_sec_snap(d1, 88.0, 3, 5)], ts=NOW)
+    cur = Feed("security", "Security", "c", data=_sec_snap(d0, 91.0, 2, 5), ts=NOW)
+    t = model.trends_model(hist, cur, None, None)
+    secm = model.security_model(cur, None)
+
+    page = pages.build_security(secm, cur, avail, gen, trend=t["security"])
+    check("trends render: security page has Posture over time", "Posture over time" in page)
+    check("trends render: MFA card shows value and improving delta",
+          "91%" in page and "+3 pts since last" in page)
+    check("trends render: admins card shows falling count", "−1 since last" in page)
+    check("trends render: sparklines drawn", "<polyline" in page)
+
+    # One point: the calm note, no chart.
+    t1 = model.trends_model(None, cur, None, None)
+    p1 = pages.build_security(secm, cur, avail, gen, trend=t1["security"])
+    check("trends render: single point says trends appear after the second refresh",
+          "after the second refresh" in p1 and "<polyline" not in p1)
+
+    # No trend at all (feed not configured): no section, no crash.
+    p0 = pages.build_security(secm, cur, avail, gen, trend=None)
+    check("trends render: no trend data renders no section", "Posture over time" not in p0)
+
+    # Overview tile: sparkline + delta with two points, nothing with one.
+    ov = pages.build_overview(
+        {"security": secm, "identity": None, "licensing": None, "fleet": None, "changes": None,
+         "trends": t},
+        {"security": cur, "tenant": cur, "licensing": cur, "history": cur, "fleet": cur}, avail, gen)
+    check("trends render: security tile carries sparkline + delta",
+          'class="spark"' in ov and "+3 pts since last" in ov)
+    ov1 = pages.build_overview(
+        {"security": secm, "identity": None, "licensing": None, "fleet": None, "changes": None,
+         "trends": t1},
+        {"security": cur, "tenant": cur, "licensing": cur, "history": cur, "fleet": cur}, avail, gen)
+    check("trends render: single-point tile has no sparkline", 'class="spark"' not in ov1)
+
+    # Licensing page: Waste over time with the dollar line when priced.
+    c1 = {"Currency": "$", "HasPrices": True, "UnusedSeatsMonthly": 500.0, "ReclaimableMonthly": 66.0,
+          "UnusedSeatsAnnual": 6000.0, "ReclaimableAnnual": 792.0, "PricedSkuCount": 1,
+          "UnpricedSkuCount": 0, "UnpricedSkus": []}
+    c2 = dict(c1, UnusedSeatsMonthly=420.0, UnusedSeatsAnnual=5040.0)
+    lh = Feed("licensing_history", "Licensing trend", "h", data=[_lic_snap(d1, 20, 3, costing=c1)], ts=NOW)
+    lc = Feed("licensing", "Licensing", "c", data=_lic_snap(d0, 16, 2, costing=c2), ts=NOW)
+    lt = model.trends_model(None, None, lh, lc)
+    lp = pages.build_licensing(model.licensing_model(lc), lc, avail, gen, trend=lt["licensing"])
+    check("trends render: licensing page has Waste over time", "Waste over time" in lp)
+    check("trends render: dollar trend card shows falling spend", "−$80 since last" in lp)
+
+
 def test_fleet_model(tmp):
     db = os.path.join(tmp, "fleet.db")
     conn = sqlite3.connect(db)
@@ -504,6 +646,8 @@ def main():
         test_licensing_model()
         test_licensing_costing_render()
         test_next_steps()
+        test_trends_model()
+        test_trends_render()
         test_fleet_model(tmp)
         test_changes_model()
         test_render_empty_console()
