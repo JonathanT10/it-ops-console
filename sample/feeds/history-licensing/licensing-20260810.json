@@ -1,0 +1,143 @@
+{
+  "GeneratedUtc": "2026-08-10T21:21:00Z",
+  "StaleDays": 90,
+  "LicensedUsers": 187,
+  "SkuSummary": [
+    {
+      "Sku": "SPB",
+      "Purchased": 188,
+      "Assigned": 175,
+      "Unassigned": 13,
+      "SuspendedOrWarning": 0,
+      "IsConsumption": false,
+      "MonthlyPrice": 33.0,
+      "UnusedMonthlyCost": 429.0
+    },
+    {
+      "Sku": "AAD_PREMIUM_P2",
+      "Purchased": 25,
+      "Assigned": 7,
+      "Unassigned": 18,
+      "SuspendedOrWarning": 0,
+      "IsConsumption": false,
+      "MonthlyPrice": 9.0,
+      "UnusedMonthlyCost": 162.0
+    },
+    {
+      "Sku": "VISIOCLIENT",
+      "Purchased": 9,
+      "Assigned": 6,
+      "Unassigned": 3,
+      "SuspendedOrWarning": 0,
+      "IsConsumption": false,
+      "MonthlyPrice": 15.0,
+      "UnusedMonthlyCost": 45.0
+    },
+    {
+      "Sku": "EXCHANGEENTERPRISE",
+      "Purchased": 9,
+      "Assigned": 9,
+      "Unassigned": 0,
+      "SuspendedOrWarning": 0,
+      "IsConsumption": false,
+      "MonthlyPrice": 8.0,
+      "UnusedMonthlyCost": 0.0
+    },
+    {
+      "Sku": "UNIVERSAL_PRINT",
+      "Purchased": 5,
+      "Assigned": 3,
+      "Unassigned": 2,
+      "SuspendedOrWarning": 0,
+      "IsConsumption": false,
+      "MonthlyPrice": null,
+      "UnusedMonthlyCost": null
+    }
+  ],
+  "ConsumptionSkus": [
+    {
+      "Sku": "FLOW_FREE",
+      "Purchased": 10000,
+      "Assigned": 187,
+      "Unassigned": 9813,
+      "IsConsumption": true
+    },
+    {
+      "Sku": "POWERAPPS_DEV",
+      "Purchased": 10000,
+      "Assigned": 140,
+      "Unassigned": 9860,
+      "IsConsumption": true
+    },
+    {
+      "Sku": "MCOPSTNC",
+      "Purchased": 10000000,
+      "Assigned": 0,
+      "Unassigned": 10000000,
+      "IsConsumption": true
+    }
+  ],
+  "ReclaimCandidates": [
+    {
+      "Reason": "DISABLED ACCOUNT",
+      "DisplayName": "Ellis Frank",
+      "UserPrincipalName": "ellis.frank@contoso.com",
+      "LastSignIn": "2025-11-04T21:24:06Z",
+      "Licenses": "SPB; VISIOCLIENT",
+      "MonthlyCost": 48.0
+    },
+    {
+      "Reason": "STALE (> 90 days)",
+      "DisplayName": "Ana Ruiz",
+      "UserPrincipalName": "ana.ruiz@contoso.com",
+      "LastSignIn": "2026-02-02T21:24:06Z",
+      "Licenses": "SPB",
+      "MonthlyCost": 33.0
+    },
+    {
+      "Reason": "NEVER SIGNED IN",
+      "DisplayName": "Conference Room 2",
+      "UserPrincipalName": "room2@contoso.com",
+      "LastSignIn": null,
+      "Licenses": "SPB",
+      "MonthlyCost": 33.0
+    },
+    {
+      "Reason": "STALE (> 90 days)",
+      "DisplayName": "Tom Baird",
+      "UserPrincipalName": "tom.baird@contoso.com",
+      "LastSignIn": "2026-05-08T21:24:06Z",
+      "Licenses": "SPB; AAD_PREMIUM_P2",
+      "MonthlyCost": 42.0
+    },
+    {
+      "Reason": "STALE (> 90 days)",
+      "DisplayName": "Lena Ortiz",
+      "UserPrincipalName": "lena.ortiz@contoso.com",
+      "LastSignIn": "2026-04-01T00:00:00Z",
+      "Licenses": "SPB",
+      "MonthlyCost": 33.0
+    },
+    {
+      "Reason": "DISABLED ACCOUNT",
+      "DisplayName": "Kiosk 4",
+      "UserPrincipalName": "kiosk4@contoso.com",
+      "LastSignIn": null,
+      "Licenses": "SPB",
+      "MonthlyCost": 33.0
+    }
+  ],
+  "Costing": {
+    "Currency": "$",
+    "HasPrices": true,
+    "PricedSkuCount": 4,
+    "UnpricedSkuCount": 1,
+    "UnpricedSkus": [
+      "UNIVERSAL_PRINT"
+    ],
+    "UnusedSeatsMonthly": 636.0,
+    "UnusedSeatsAnnual": 7632.0,
+    "ReclaimableMonthly": 222.0,
+    "ReclaimableAnnual": 2664.0
+  }
+}
