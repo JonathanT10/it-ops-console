@@ -1,0 +1,280 @@
+# Test: run-all.ps1's sign-in ladder.        pwsh tests/test_run_all_signin.ps1
+#
+# Drives run-all against stub collectors and a stub Microsoft.Graph.Authentication
+# module, so every rung of the ladder can be made to succeed, fail, or hang:
+#   1. the registered app + certificate (unattended schedule)
+#   2. the saved sign-in, silently (from the scheduled run's child process)
+#   3. a sign-in window - with the time limit a scheduled run puts on it
+#   4. stop cleanly: skip the Microsoft 365 steps, still build the console,
+#      say why in refresh-status.json and on the overview, exit 1
+# It also checks the sign-out rule: a person's "stay signed in" choice is
+# honoured only for the while-signed-in schedule; app sign-ins always close.
+#
+# Nothing here touches Microsoft 365: the stub module is what gets imported.
+# Runs on Linux (pwsh) or Windows. Two cases wait out the 30-second time limit.
+$ErrorActionPreference = 'Stop'
+$here = Split-Path -Parent $PSCommandPath
+$repo = Split-Path -Parent $here
+$work = Join-Path ([IO.Path]::GetTempPath()) "itops-signin-$([guid]::NewGuid().ToString('n').Substring(0, 6))"
+$tools = Join-Path $work 'tools'; $out = Join-Path $work 'out'; $site = Join-Path $work 'site'
+$mods = Join-Path $work 'mods'; $log = Join-Path $work 'graph.log'
+$cfg = Join-Path $work 'sources.ini'; $ini = Join-Path $work 'automatic-refresh.ini'
+$null = New-Item -ItemType Directory -Path $tools, $out, $site, $mods -Force
+$python = if (Get-Command python3 -ErrorAction SilentlyContinue) { 'python3' } else { 'python' }
+
+$fails = [System.Collections.Generic.List[string]]::new()
+function Check { param([string]$Label, [bool]$Cond)
+    Write-Host ("{0} {1}" -f ($(if ($Cond) { 'PASS' } else { 'FAIL' })), $Label)
+    if (-not $Cond) { $fails.Add($Label) }
+}
+
+# ---- stub collectors: copy the sample feeds into place ---------------------- #
+$sample = Join-Path $repo 'sample/feeds'
+foreach ($d in 'entra-tenant-docs', 'entra-security-snapshot', 'm365-license-waste-report', 'print-fleet-dashboard') {
+    $null = New-Item -ItemType Directory -Path (Join-Path $tools $d) -Force
+}
+Set-Content (Join-Path $tools 'entra-tenant-docs/Export-EntraTenantDocs.ps1') @"
+param([string]`$OutputPath)
+`$null = New-Item -ItemType Directory -Path `$OutputPath -Force
+Copy-Item '$sample/tenant.json' (Join-Path `$OutputPath 'tenant.json')
+Copy-Item '$sample/run-summary.json' (Join-Path `$OutputPath 'run-summary.json')
+Write-Host 'stub tenant-docs ok'
+"@
+Set-Content (Join-Path $tools 'entra-security-snapshot/Get-EntraSecuritySnapshot.ps1') @"
+param([string]`$JsonPath, [int]`$StaleDays)
+Copy-Item '$sample/security-snapshot.json' `$JsonPath
+Write-Host 'stub security ok'
+"@
+Set-Content (Join-Path $tools 'm365-license-waste-report/Get-LicenseWasteReport.ps1') @"
+param([string]`$JsonPath, [int]`$StaleDays, [string]`$PriceList)
+Copy-Item '$sample/licensing.json' `$JsonPath
+Write-Host 'stub license ok'
+"@
+Set-Content $cfg @"
+[console]
+base_path = $out
+[sources]
+tenant      = tenant-docs/tenant.json
+run_summary = tenant-docs/run-summary.json
+security    = security-snapshot.json
+licensing   = licensing.json
+refresh_status = refresh-status.json
+history =
+fleet =
+"@
+
+# ---- stub Microsoft.Graph.Authentication --------------------------------- #
+# Behaviour comes from ITOPS_STUB_GRAPH (comma list): app-ok, user-fail, hang.
+# An app connect without app-ok throws like a bad certificate does. Every call
+# is appended to ITOPS_STUB_LOG so the test can see WHICH rungs ran.
+$modDir = Join-Path $mods 'Microsoft.Graph.Authentication'
+$null = New-Item -ItemType Directory -Path $modDir -Force
+Set-Content (Join-Path $modDir 'Microsoft.Graph.Authentication.psm1') @'
+$script:ctx = $null
+function Connect-MgGraph {
+    param([string[]]$Scopes, [string]$ClientId, [string]$TenantId, [string]$CertificateThumbprint, [switch]$NoWelcome)
+    $modes = "$env:ITOPS_STUB_GRAPH" -split ','
+    if ($ClientId) {
+        Add-Content $env:ITOPS_STUB_LOG "connect app $ClientId $TenantId $CertificateThumbprint"
+        if ($modes -contains 'app-ok') {
+            $script:ctx = [pscustomobject]@{ Account = $null; ClientId = $ClientId; AuthType = 'AppOnly'; Scopes = @('Directory.Read.All') }
+            return
+        }
+        throw 'AADSTS700027: Client assertion contains an invalid signature. [Reason - The key was not found.]'
+    }
+    Add-Content $env:ITOPS_STUB_LOG "connect user scopes=$(@($Scopes).Count)"
+    if ($modes -contains 'hang') { Start-Sleep -Seconds 120 }
+    if ($modes -contains 'user-fail') { throw 'InteractiveBrowserCredential authentication failed: User canceled authentication.' }
+    $script:ctx = [pscustomobject]@{ Account = 'someone@example.com'; ClientId = $null; AuthType = 'Delegated'; Scopes = $Scopes }
+}
+function Get-MgContext { $script:ctx }
+function Disconnect-MgGraph { Add-Content $env:ITOPS_STUB_LOG 'disconnect'; $script:ctx = $null }
+Export-ModuleMember -Function Connect-MgGraph, Get-MgContext, Disconnect-MgGraph
+'@
+$env:PSModulePath = $mods + [IO.Path]::PathSeparator + $env:PSModulePath
+$env:ITOPS_STUB_LOG = $log
+
+# The certificate store does not exist off Windows, so the child session gets a
+# Get-Item that answers Cert: paths from ITOPS_STUB_CERT_NOTAFTER (set = the
+# certificate is present with that expiry; unset = not in the store).
+$preamble = @'
+function Get-Item {
+    [CmdletBinding()] param([Parameter(Position=0)][string]$Path, [string]$LiteralPath, [switch]$Force)
+    if ($Path -like 'Cert:*') {
+        if ($env:ITOPS_STUB_CERT_NOTAFTER) {
+            return [pscustomobject]@{ NotAfter = [datetime]$env:ITOPS_STUB_CERT_NOTAFTER; Thumbprint = ($Path -split '[\\/]')[-1] }
+        }
+        throw "Cannot find path '$Path' because it does not exist."
+    }
+    if ($LiteralPath) { return Microsoft.PowerShell.Management\Get-Item -LiteralPath $LiteralPath -Force:$Force }
+    Microsoft.PowerShell.Management\Get-Item -Path $Path -Force:$Force
+}
+'@
+
+function Run-Case {
+    param([string]$Graph, [string]$CertNotAfter, [string]$IniText, [switch]$Desktop, [switch]$NoConnect, [int]$Timeout = 30)
+    if (Test-Path $log) { Remove-Item $log }
+    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+    if (Test-Path $site) { Remove-Item $site -Recurse -Force }
+    $null = New-Item -ItemType Directory -Path $out, $site -Force
+    if ($IniText) { Set-Content $ini $IniText } elseif (Test-Path $ini) { Remove-Item $ini }
+    # earlier cases leave the price-list starter behind; each case starts clean
+    Remove-Item (Join-Path $tools 'm365-license-waste-report/prices.ini') -ErrorAction SilentlyContinue
+    $env:ITOPS_STUB_GRAPH = $Graph
+    $env:ITOPS_STUB_CERT_NOTAFTER = $CertNotAfter
+    $flags = @()
+    if (-not $Desktop) { $flags += '-Scheduled' }
+    if ($NoConnect) { $flags += '-NoConnect' }
+    $cmd = $preamble + "`n& '$repo/run-all.ps1' -ToolRoot '$tools' -OutputRoot '$out' -SitePath '$site' -ConfigPath '$cfg' -RefreshConfig '$ini' -Python $python -NoStatusPage -SignInTimeoutSeconds $Timeout $($flags -join ' ')"
+    $text = (& pwsh -NoProfile -Command $cmd 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $status = $null
+    $sp = Join-Path $out 'refresh-status.json'
+    if (Test-Path $sp) { $status = Get-Content $sp -Raw | ConvertFrom-Json }
+    $entries = @(); if (Test-Path $log) { $entries = @(Get-Content $log) }
+    $index = ''; $ip = Join-Path $site 'index.html'
+    if (Test-Path $ip) { $index = Get-Content $ip -Raw }
+    return @{ Code = $code; Text = $text; Status = $status; Log = $entries; Index = $index }
+}
+function Count { param($Log, [string]$Like) @($Log | Where-Object { $_ -like $Like }).Count }
+
+$iniKeep = @"
+[schedule]
+mode = while-signed-in
+time = 07:00
+run_as = X\sam
+[signin]
+keep_signed_in = yes
+"@
+$iniApp = @"
+[schedule]
+mode = unattended
+time = 06:30
+run_as = SYSTEM
+[signin]
+keep_signed_in = no
+tenant_id = 11111111-1111-1111-1111-111111111111
+client_id = 22222222-2222-2222-2222-222222222222
+certificate_thumbprint = ABCDEF0123456789ABCDEF0123456789ABCDEF01
+certificate_expires = 2028-08-01
+"@
+$plus700 = (Get-Date).AddDays(700).ToString('yyyy-MM-dd')
+$minus13 = (Get-Date).AddDays(-13).ToString('yyyy-MM-dd')
+
+Write-Host ''
+Write-Host '-- 1. no schedule file, scheduled run, saved sign-in works: signs in, signs out'
+$r = Run-Case -Graph 'user-ok'
+Check 'exit 0' ($r.Code -eq 0)
+Check 'mode user' ($r.Status.SignIn.Mode -eq 'user')
+Check 'probe + parent = two user connects' ((Count $r.Log 'connect user*') -eq 2)
+Check 'no app connect attempted' ((Count $r.Log 'connect app*') -eq 0)
+Check 'signed out at the end (no schedule -> old behaviour)' ((Count $r.Log 'disconnect') -eq 1 -and $r.Text -like '*Signed out of Microsoft Graph*')
+Check 'status: not keeping signed in' ($r.Status.KeepSignedIn -eq $false)
+Check 'status: schedule off' ($r.Status.Schedule.Mode -eq 'off')
+Check 'status: final, ok' ($r.Status.Final -eq $true -and $r.Status.Ok -eq $true)
+Check 'collectors ran' ((Test-Path (Join-Path $out 'tenant-docs/tenant.json')) -and (Test-Path (Join-Path $out 'licensing.json')))
+Check 'no banner on the overview' ($r.Index -notlike '*class="banner*')
+
+Write-Host ''
+Write-Host '-- 2. while-signed-in schedule with keep_signed_in: stays signed in'
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep
+Check 'exit 0' ($r.Code -eq 0)
+Check 'no disconnect' ((Count $r.Log 'disconnect') -eq 0)
+Check 'says so in words' ($r.Text -like '*Staying signed in to Microsoft Graph for the next automatic refresh*')
+Check 'status: keeping signed in' ($r.Status.KeepSignedIn -eq $true)
+Check 'status: schedule while-signed-in 07:00' ($r.Status.Schedule.Mode -eq 'while-signed-in' -and $r.Status.Schedule.Time -eq '07:00')
+Check 'footer note on every page' ($r.Index -like '*refresh-note">Automatic refresh: every day at 07:00 while you&#x27;re signed in. This computer stays signed in*')
+
+Write-Host ''
+Write-Host '-- 3. while-signed-in, the sign-in window is never finished: time limit, run continues, exit 1'
+$sw = [Diagnostics.Stopwatch]::StartNew()
+$r = Run-Case -Graph 'hang' -IniText $iniKeep -Timeout 30
+$sw.Stop()
+Check 'exit 1' ($r.Code -eq 1)
+Check 'gave up after the limit, not much later' ($sw.Elapsed.TotalSeconds -ge 30 -and $sw.Elapsed.TotalSeconds -lt 90)
+Check 'sign-in not ok' ($r.Status.SignIn.Ok -eq $false -and $r.Status.SignIn.Mode -eq 'none')
+Check 'dropped rung says nobody finished the window' (@($r.Status.SignIn.Dropped)[0] -like 'Nobody finished the Microsoft sign-in window within 1 minute*')
+Check 'detail tells the person what to do' ($r.Status.SignIn.Detail -like '*Double-click "Refresh IT Ops Data"*')
+Check 'only the probe connected (parent never tried)' ((Count $r.Log 'connect user*') -eq 1)
+Check 'no disconnect (nothing to close)' ((Count $r.Log 'disconnect') -eq 0)
+$steps = @{}; foreach ($s in $r.Status.Steps) { $steps[$s.Step] = $s }
+Check 'sign-in recorded FAILED' ($steps['sign-in'].Status -eq 'FAILED')
+Check 'Microsoft 365 steps skipped, reason given' ($steps['entra-tenant-docs'].Status -eq 'skipped' -and $steps['entra-tenant-docs'].Detail -eq 'not signed in' -and $steps['m365-license-waste-report'].Status -eq 'skipped')
+Check 'console still built' ($steps['console build'].Status -eq 'ok' -and $r.Index.Length -gt 0)
+Check 'overview banner: could not sign in, what to do' ($r.Index -like '*class="banner warning"*' -and $r.Index -like '*couldn&#x27;t sign in*' -and $r.Index -like '*Double-click &quot;Refresh IT Ops Data&quot;*')
+Check 'no collector output written' (-not (Test-Path (Join-Path $out 'tenant-docs')))
+Check 'no price-list starter written without a license run' (-not (Test-Path (Join-Path $tools 'm365-license-waste-report/prices.ini')))
+
+Write-Host ''
+Write-Host '-- 4. unattended schedule, certificate present and valid, app sign-in works'
+$r = Run-Case -Graph 'app-ok' -IniText $iniApp -CertNotAfter $plus700
+Check 'exit 0' ($r.Code -eq 0)
+Check 'mode app' ($r.Status.SignIn.Mode -eq 'app')
+Check 'connected as the app with tenant, client, thumbprint' ((Count $r.Log 'connect app 22222222-2222-2222-2222-222222222222 11111111-1111-1111-1111-111111111111 ABCDEF0123456789ABCDEF0123456789ABCDEF01') -eq 1)
+Check 'no user sign-in attempted' ((Count $r.Log 'connect user*') -eq 0)
+Check 'app sign-in always closed' ((Count $r.Log 'disconnect') -eq 1)
+Check 'nothing dropped' (@($r.Status.SignIn.Dropped).Count -eq 0)
+Check 'certificate days left from the store' ($r.Status.Certificate.Present -eq $true -and $r.Status.Certificate.DaysLeft -ge 698 -and $r.Status.Certificate.DaysLeft -le 700)
+Check 'footer note names the app route' ($r.Index -like '*as the registered app, whether or not anyone is signed in*')
+Check 'no banner' ($r.Index -notlike '*class="banner*')
+
+Write-Host ''
+Write-Host '-- 5. unattended, certificate EXPIRED, saved sign-in still works: falls through AND says so'
+$r = Run-Case -Graph 'user-ok' -IniText $iniApp -CertNotAfter $minus13
+Check 'exit 0 (the run itself worked)' ($r.Code -eq 0)
+Check 'mode user' ($r.Status.SignIn.Mode -eq 'user')
+Check 'app never attempted with an expired certificate' ((Count $r.Log 'connect app*') -eq 0)
+Check 'dropped rung reported' (@($r.Status.SignIn.Dropped)[0] -like "The automatic-refresh certificate expired on $minus13*")
+Check 'warned on screen too' ($r.Text -like '*certificate expired on*')
+Check 'certificate days left negative' ($r.Status.Certificate.DaysLeft -lt 0)
+Check 'signed out (keep applies to while-signed-in only)' ((Count $r.Log 'disconnect') -eq 1)
+Check 'overview: fall-back banner AND expired-certificate banner' ($r.Index -like '*couldn&#x27;t use its usual sign-in*' -and $r.Index -like '*class="banner serious"*' -and $r.Index -like "*expired on $minus13*")
+
+Write-Host ''
+Write-Host '-- 6. unattended, certificate valid, app sign-in rejected by Microsoft: reported, falls through'
+$r = Run-Case -Graph 'user-ok' -IniText $iniApp -CertNotAfter $plus700
+Check 'exit 0' ($r.Code -eq 0)
+Check 'app attempted once' ((Count $r.Log 'connect app*') -eq 1)
+Check 'reason kept verbatim' (@($r.Status.SignIn.Dropped)[0] -like 'Signing in as the registered app failed: AADSTS700027*')
+Check 'mode user' ($r.Status.SignIn.Mode -eq 'user')
+Check 'overview: fall-back banner' ($r.Index -like '*couldn&#x27;t use its usual sign-in: Signing in as the registered app failed: AADSTS700027*')
+
+Write-Host ''
+Write-Host '-- 7. unattended, certificate NOT in the store, nobody finishes the window: two drops, stop cleanly'
+$r = Run-Case -Graph 'hang' -IniText $iniApp -Timeout 30
+Check 'exit 1' ($r.Code -eq 1)
+Check 'first drop: certificate missing' (@($r.Status.SignIn.Dropped)[0] -like "*not in this computer's certificate store*")
+Check 'second drop: window not finished' (@($r.Status.SignIn.Dropped)[1] -like 'Nobody finished*')
+Check 'mode none' ($r.Status.SignIn.Mode -eq 'none')
+Check 'certificate expiry from the ini when the store has none' ($r.Status.Certificate.Present -eq $false -and $r.Status.Certificate.Expires -eq '2028-08-01')
+
+Write-Host ''
+Write-Host '-- 8. desktop click on a while-signed-in machine: in-process sign-in, stays signed in'
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop
+Check 'exit 0' ($r.Code -eq 0)
+Check 'one in-process connect, no probe' ((Count $r.Log 'connect user*') -eq 1)
+Check 'stays signed in' ((Count $r.Log 'disconnect') -eq 0 -and $r.Text -like '*Staying signed in*')
+Check 'status: not a scheduled run' ($r.Status.Scheduled -eq $false)
+
+Write-Host ''
+Write-Host '-- 9. desktop click, no schedule, sign-in cancelled: recorded, console built, no banner'
+$r = Run-Case -Graph 'user-fail' -Desktop
+Check 'exit 1' ($r.Code -eq 1)
+Check 'reason recorded' (@($r.Status.SignIn.Dropped)[0] -like 'The sign-in did not complete: InteractiveBrowserCredential*')
+Check 'console built' ($r.Index.Length -gt 0)
+Check 'no banner for an unscheduled run' ($r.Index -notlike '*class="banner*')
+Check 'plain words in the summary' ($r.Text -like '*In plain words:*' -and $r.Text -like '*sign-in: The sign-in did not complete*')
+
+Write-Host ''
+Write-Host '-- 10. -NoConnect: the session you opened yourself'
+$r = Run-Case -Graph 'user-ok' -NoConnect
+Check 'exit 0' ($r.Code -eq 0)
+Check 'mode existing' ($r.Status.SignIn.Mode -eq 'existing')
+Check 'no Graph calls at all' ($r.Log.Count -eq 0)
+
+Write-Host ''
+Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+$env:ITOPS_STUB_GRAPH = $null; $env:ITOPS_STUB_CERT_NOTAFTER = $null; $env:ITOPS_STUB_LOG = $null
+if ($fails.Count) { Write-Host "RESULT: $($fails.Count) FAILURES"; $fails | ForEach-Object { Write-Host "  - $_" }; exit 1 }
+Write-Host 'RESULT: ALL PASS'
+exit 0

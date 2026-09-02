@@ -542,6 +542,123 @@ def test_changes_model():
 # Rendering
 # --------------------------------------------------------------------------- #
 
+def _refresh_feed(**over):
+    base = {
+        "GeneratedUtc": iso(NOW - timedelta(hours=3)), "Scheduled": True, "Final": True, "Ok": True,
+        "Message": "Everything ran.", "SignIn": {"Mode": "user", "Ok": True, "Detail": "", "Dropped": []},
+        "Steps": [], "Schedule": {"Mode": "while-signed-in", "Time": "07:00", "RunAs": "X\\sam"},
+        "KeepSignedIn": True, "Certificate": None,
+    }
+    base.update(over)
+    return Feed("refresh_status", "Automatic refresh", "x", data=base, ts=NOW - timedelta(hours=3))
+
+
+def test_refresh_model():
+    """Footer note always states the schedule; banners only when a person must act."""
+    check("refresh: no feed -> no model", model.refresh_model(None) is None)
+    check("refresh: unconfigured feed -> no model",
+          model.refresh_model(Feed("refresh_status", "Automatic refresh", None)) is None)
+
+    ok = model.refresh_model(_refresh_feed())
+    check("refresh: happy path has no banner", ok["banners"] == [])
+    check("refresh: note states the schedule", "every day at 07:00 while you're signed in" in ok["note"])
+    check("refresh: note says it stays signed in when that is the choice",
+          "stays signed in to Microsoft Graph" in ok["note"])
+    no_keep = model.refresh_model(_refresh_feed(KeepSignedIn=False))
+    check("refresh: note omits stays-signed-in when it does not apply",
+          "stays signed in" not in no_keep["note"])
+    off = model.refresh_model(_refresh_feed(Schedule={"Mode": "off", "Time": "", "RunAs": ""}))
+    check("refresh: off mode names the desktop shortcut", "Refresh IT Ops Data" in off["note"])
+
+    failed = model.refresh_model(_refresh_feed(
+        Ok=False, SignIn={"Mode": "none", "Ok": False,
+                          "Detail": "Nobody finished the Microsoft sign-in window within 5 minutes.",
+                          "Dropped": ["Nobody finished the Microsoft sign-in window within 5 minutes."]}))
+    check("refresh: failed sign-in -> one banner", len(failed["banners"]) == 1)
+    check("refresh: failed sign-in banner says what to do",
+          "couldn't sign in" in failed["banners"][0]["text"]
+          and 'Double-click "Refresh IT Ops Data"' in failed["banners"][0]["text"])
+    check("refresh: failed sign-in banner carries the detail",
+          "Nobody finished" in failed["banners"][0]["detail"])
+
+    # A desktop click that could not sign in is not the schedule's problem.
+    desk = model.refresh_model(_refresh_feed(Scheduled=False, Ok=False,
+                                             SignIn={"Mode": "none", "Ok": False, "Detail": "x", "Dropped": ["x"]}))
+    check("refresh: an unscheduled run never raises a banner", desk["banners"] == [])
+
+    dropped = model.refresh_model(_refresh_feed(SignIn={
+        "Mode": "user", "Ok": True, "Detail": "Signed in with read-only access",
+        "Dropped": ["Signing in as the registered app failed: AADSTS700027 bad key."]}))
+    check("refresh: a passed-over rung is reported even though the run worked",
+          len(dropped["banners"]) == 1 and "couldn't use its usual sign-in" in dropped["banners"][0]["text"]
+          and "AADSTS700027" in dropped["banners"][0]["text"])
+
+    soon = model.refresh_model(_refresh_feed(
+        Schedule={"Mode": "unattended", "Time": "06:30", "RunAs": "SYSTEM"}, KeepSignedIn=False,
+        SignIn={"Mode": "app", "Ok": True, "Detail": "", "Dropped": []},
+        Certificate={"Thumbprint": "AB", "Present": True, "Expires": "2026-09-14", "DaysLeft": 12}))
+    check("refresh: unattended note names the app route and the expiry",
+          "as the registered app" in soon["note"] and "expires 2026-09-14" in soon["note"])
+    check("refresh: certificate within 30 days -> warning banner",
+          len(soon["banners"]) == 1 and soon["banners"][0]["tone"] == "warning"
+          and "expires in 12 days" in soon["banners"][0]["text"])
+    far = model.refresh_model(_refresh_feed(
+        Schedule={"Mode": "unattended", "Time": "06:30", "RunAs": "SYSTEM"},
+        SignIn={"Mode": "app", "Ok": True, "Detail": "", "Dropped": []},
+        Certificate={"Thumbprint": "AB", "Present": True, "Expires": "2028-09-01", "DaysLeft": 729}))
+    check("refresh: certificate far off -> no banner", far["banners"] == [])
+    gone = model.refresh_model(_refresh_feed(
+        Ok=False, Schedule={"Mode": "unattended", "Time": "06:30", "RunAs": "SYSTEM"},
+        SignIn={"Mode": "none", "Ok": False, "Detail": "The automatic-refresh certificate expired on 2026-08-20.",
+                "Dropped": ["The automatic-refresh certificate expired on 2026-08-20 - re-run setup."]},
+        Certificate={"Thumbprint": "AB", "Present": True, "Expires": "2026-08-20", "DaysLeft": -13}))
+    check("refresh: expired certificate -> sign-in banner plus a serious certificate banner",
+          len(gone["banners"]) == 2 and gone["banners"][1]["tone"] == "serious"
+          and "expired on 2026-08-20" in gone["banners"][1]["text"])
+
+
+def test_refresh_render():
+    from console import render as _r
+    feeds = {k: Feed(k, k, None) for k in
+             ("tenant", "run_summary", "security", "licensing", "history", "fleet")}
+    models = {k: None for k in ("identity", "security", "licensing", "fleet", "changes")}
+    available = {"index": True, "identity": False, "security": False,
+                 "licensing": False, "fleet": False, "changes": False}
+
+    models["refresh"] = model.refresh_model(_refresh_feed())
+    page = pages.build_overview(models, feeds, available, "now")
+    check("refresh render: happy path shows no banner", 'class="banner' not in page)
+
+    models["refresh"] = model.refresh_model(_refresh_feed(
+        Ok=False, SignIn={"Mode": "none", "Ok": False, "Detail": "<b>raw</b> detail",
+                          "Dropped": ["<b>raw</b> detail"]}))
+    page = pages.build_overview(models, feeds, available, "now")
+    check("refresh render: failed sign-in banner on the overview",
+          'class="banner warning"' in page and "couldn&#x27;t sign in" in page)
+    check("refresh render: banner detail is escaped", "<b>raw</b>" not in page and "&lt;b&gt;raw" in page)
+    check("refresh render: banner is placed before the tiles",
+          page.index('class="banner') < page.index('class="tiles"'))
+
+    # A refresh_status that has gone old must not be listed as a stale feed -
+    # every real feed is old too and already says so.
+    old_feed = Feed("refresh_status", "Automatic refresh", "x", data=_refresh_feed().data,
+                    ts=NOW - timedelta(days=20))
+    feeds2 = dict(feeds); feeds2["refresh_status"] = old_feed
+    page = pages.build_overview(models, feeds2, available, "now")
+    check("refresh render: old refresh_status not listed under Stale data",
+          "Automatic refresh</span>" not in page)
+
+    try:
+        _r.REFRESH_NOTE = "Automatic refresh: every day at 07:00 while you're signed in."
+        page = pages.build_fleet(None, feeds["fleet"], {"index": True}, "now")
+        check("refresh render: footer note appears on every page when set",
+              'class="refresh-note">Automatic refresh: every day at 07:00' in page)
+    finally:
+        _r.REFRESH_NOTE = ""
+    page = pages.build_fleet(None, feeds["fleet"], {"index": True}, "now")
+    check("refresh render: no footer note without a refresh feed", 'class="refresh-note"' not in page)
+
+
 def _all_pages(models, feeds, available):
     gen = "2026-01-01 00:00:00"
     return {
@@ -637,6 +754,9 @@ def test_render_full(tmp):
           all(('%s.html' % p) in idx for p in
               ("identity", "security", "licensing", "fleet", "changes")))
     check("render: freshness dot rendered", 'class="dot' in idx)
+    check("render: sample footer states the automatic-refresh schedule",
+          'class="refresh-note">Automatic refresh: every day at 07:00' in idx)
+    check("render: sample overview has no banner (its last refresh worked)", 'class="banner' not in idx)
     with open(os.path.join(site, "fleet.html"), encoding="utf-8") as fh:
         check("render: fleet page has meters", 'class="meter"' in fh.read())
 
@@ -654,6 +774,8 @@ def main():
         test_trends_render()
         test_fleet_model(tmp)
         test_changes_model()
+        test_refresh_model()
+        test_refresh_render()
         test_render_empty_console()
         test_render_escaping()
         test_render_full(tmp)
