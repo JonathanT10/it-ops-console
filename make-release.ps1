@@ -92,19 +92,18 @@ cleared - plus one weekly summary. After that you never need the file again:
 change what you are told about on the console's Alerts tab, click "Save
 settings", and double-click "Apply Settings" on your desktop.
 
-Printers: you do not have to type every address. On the console's Print
-fleet tab, under "Where we look", name a subnet (10.0.10.0/24), a span
-(10.0.20.50-99) or a single address, Save settings, Apply Settings - and
-the next Refresh finds the printers on it. That is a scan of the addresses
-you name, so point it at your own VLANs.
+Printers (optional): you do not have to type every address. On the console's
+Print fleet tab, under "Where we look", name a subnet (10.0.10.0/24), a span
+(10.0.20.50-99) or a single address, Save settings, Apply Settings - and the
+next Refresh finds the printers on it. That is a scan of the addresses you
+name, so point it at your own VLANs. You can still list them by hand in
+C:\IT-Ops\tools\print-fleet-dashboard\config.ini instead; either way the next
+Refresh picks them up.
 
 Everything against your tenant is read-only. Nothing stores a password.
 Setup locks the C:\IT-Ops folder to you and Administrators, so the data it
 collects (admin names, stale accounts, the app inventory) is not readable by
 other people who use this computer.
-Printers are optional: put their IPs in
-C:\IT-Ops\tools\print-fleet-dashboard\config.ini and the next Refresh
-picks them up automatically.
 
 If something goes wrong: run check-setup.ps1 in C:\IT-Ops\tools\it-ops-console
 (right-click > Run with PowerShell) and send check-setup.log to whoever helps you.
