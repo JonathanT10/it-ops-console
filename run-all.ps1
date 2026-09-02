@@ -119,6 +119,11 @@ param(
     [switch]$NoConnect,
     [switch]$NoStatusPage,
     [switch]$Scheduled,
+    # How long the security snapshot may spend talking to Microsoft 365 before
+    # it reports what it has. Its sign-in-log sweep is the slowest and most
+    # throttled thing this whole refresh does, and an unbounded one is
+    # indistinguishable from a hang. 0 removes the limit.
+    [ValidateRange(0, 240)][int]$SecurityBudgetMinutes = 20,
     [string]$RefreshConfig,
     [ValidateRange(30, 3600)][int]$SignInTimeoutSeconds = 300,
     [string]$AlertsConfig,
@@ -440,7 +445,7 @@ function Get-RefreshCertificateInfo {
        the run - and the console - can say "expires in 12 days" before it
        silently stops working. #>
     param($Ini)
-    $info = @{ Configured = $false; TenantId = ''; ClientId = ''; Thumbprint = ''; Present = $false; Expires = $null; DaysLeft = $null; Expired = $false }
+    $info = @{ Configured = $false; TenantId = ''; ClientId = ''; Thumbprint = ''; Present = $false; Expires = $null; DaysLeft = $null; Expired = $false; KeyUsable = $false; KeyWhy = '' }
     $info.Thumbprint = (Get-IniValue $Ini 'signin' 'certificate_thumbprint') -replace '\s', ''
     $info.TenantId   = Get-IniValue $Ini 'signin' 'tenant_id'
     $info.ClientId   = Get-IniValue $Ini 'signin' 'client_id'
@@ -453,6 +458,32 @@ function Get-RefreshCertificateInfo {
     if ($cert) {
         $info.Present = $true
         $info.Expires = [datetime]$cert.NotAfter
+        # SEEING the certificate is not the same as being allowed to USE it.
+        # The private key of a LocalMachine certificate is readable by SYSTEM
+        # and Administrators, so an ordinary sign-in can list this certificate
+        # and still fail at "Keyset does not exist" the moment Graph needs it.
+        # Ask now, while there is somewhere sensible to say so.
+        # Usable unless we can PROVE otherwise. A check that cannot run (an
+        # older certificate object, a non-Windows host) must not condemn a
+        # certificate that would have worked - the sign-in itself is the real
+        # test, and its error now comes back in plain words either way.
+        $info.KeyUsable = $true
+        $hasKeyProp = $cert.PSObject.Properties['HasPrivateKey']
+        if ($hasKeyProp -and -not $cert.HasPrivateKey) {
+            $info.KeyUsable = $false
+            $info.KeyWhy = 'this copy of it has no private key'
+        } elseif ($hasKeyProp) {
+            try {
+                $key = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
+                if ($key) { try { $key.Dispose() } catch { } }
+                else {
+                    $info.KeyUsable = $false
+                    $info.KeyWhy = 'this account is not allowed to use its private key'
+                }
+            } catch {
+                # Could not ask. Leave it usable and let the sign-in decide.
+            }
+        }
     } else {
         # Not in the store (or no store on this OS): fall back to the expiry
         # setup recorded, so the words about it are still right.
@@ -464,6 +495,26 @@ function Get-RefreshCertificateInfo {
         $info.Expired = $info.DaysLeft -lt 0
     }
     return $info
+}
+
+function Get-CertSignInWords {
+    <# The certificate sign-in's own error text, with a sentence in front of it
+       that says what to do. The original is KEPT - an error code is what you
+       search for when the plain words are not enough - but "Keyset does not
+       exist" on its own tells nobody anything, and it is the first thing the
+       person who clicked Refresh has to read. #>
+    param([string]$Message)
+    $plain = switch -Wildcard ($Message) {
+        '*Keyset does not exist*'       { "this account is not allowed to use the certificate's private key. Re-run setup as an administrator to set it up again." }
+        '*key is not accessible*'       { "this account is not allowed to use the certificate's private key. Re-run setup as an administrator to set it up again." }
+        '*Cannot find the certificate*' { 'the certificate is no longer in this computer. Re-run setup to make a new one and upload it.' }
+        '*AADSTS700027*'                { 'Microsoft 365 does not recognise this certificate any more. Re-run setup to make a new one and upload it.' }
+        '*AADSTS7000215*'               { 'Microsoft 365 rejected the credential. Re-run setup to make a new one and upload it.' }
+        '*Authorization_RequestDenied*' { 'the app signed in but is not allowed to read - a Global Administrator still has to grant admin consent.' }
+        default                         { '' }
+    }
+    if (-not $plain) { return $Message }
+    return "$plain ($($Message.Trim()))"
 }
 
 function Invoke-SignInProbe {
@@ -504,8 +555,15 @@ $schedRunAs   = Get-IniValue $refreshIni 'schedule' 'run_as'
 # Staying signed in between runs is a choice a person made in setup, and only
 # for the "while I'm signed in" schedule. Anything else signs out at the end,
 # exactly as before.
-$keepSignedIn = ($schedMode -eq 'while-signed-in') -and
-                ((Get-IniValue $refreshIni 'signin' 'keep_signed_in' 'no') -match '^(yes|true|1)$')
+# Two ways to end a run still signed in:
+#   - the "refresh while I'm signed in" schedule, which a person chose in setup;
+#   - a refresh a person started THEMSELVES. Signing them out at the end only
+#     means the next click asks them to pick their account again, which is the
+#     whole cost and none of the benefit: they are sitting right here.
+# A scheduled run and an app sign-in always close, as before.
+$keepSignedIn = (-not $Scheduled) -or
+                (($schedMode -eq 'while-signed-in') -and
+                 ((Get-IniValue $refreshIni 'signin' 'keep_signed_in' 'no') -match '^(yes|true|1)$'))
 $certInfo     = Get-RefreshCertificateInfo $refreshIni
 
 # ---- the sign-in ladder --------------------------------------------------- #
@@ -516,7 +574,7 @@ $certInfo     = Get-RefreshCertificateInfo $refreshIni
 # A rung that is passed over is REPORTED, not hidden - an expired certificate
 # must not be papered over by a sign-in that happened to still work.
 $script:GraphConnectedByUs = $false
-$script:SignIn = [ordered]@{ Mode = 'none'; Ok = $true; Detail = ''; Dropped = @() }
+$script:SignIn = [ordered]@{ Mode = 'none'; Ok = $true; Detail = ''; Dropped = @(); Missing = @() }
 function Drop-SignInRung {
     param([string]$Why)
     $script:SignIn.Dropped = @($script:SignIn.Dropped) + $Why
@@ -560,14 +618,26 @@ if (-not $needGraph) {
             $script:SignIn.Mode = 'existing'
         }
 
-        # Rung 1: the registered app, when this machine was set up for unattended runs.
-        if ($script:SignIn.Mode -eq 'none' -and $schedMode -eq 'unattended') {
+        # Rung 1: the registered app. This is the SCHEDULED run's route: the
+        # certificate lives in the computer's store, where its private key is
+        # readable by SYSTEM and Administrators - not by you at your desk. So
+        # a refresh you started yourself does not try it. It used to, and the
+        # failure ("Keyset does not exist") dropped a browser sign-in window
+        # in front of whoever clicked Refresh, every single time.
+        if ($script:SignIn.Mode -eq 'none' -and $schedMode -eq 'unattended' -and -not $Scheduled) {
+            $note = 'The registered app and its certificate are for the scheduled refresh, which runs as this computer. This one is yours, so it signs in as you.'
+            Write-Host $note
+            Add-StatusLine 'signin' $note
+        }
+        if ($script:SignIn.Mode -eq 'none' -and $schedMode -eq 'unattended' -and $Scheduled) {
             if (-not $certInfo.Configured) {
                 Drop-SignInRung 'Automatic refresh is set to run unattended, but the registered app or its certificate is missing from automatic-refresh.ini - re-run setup to finish that step.'
             } elseif ($certInfo.Expired) {
                 Drop-SignInRung ("The automatic-refresh certificate expired on {0} - re-run setup to make a new one and upload it." -f $certInfo.Expires.ToString('yyyy-MM-dd'))
             } elseif (-not $certInfo.Present) {
-                Drop-SignInRung "The automatic-refresh certificate ($($certInfo.Thumbprint)) is not in this computer's certificate store, or this account cannot use it."
+                Drop-SignInRung "The automatic-refresh certificate ($($certInfo.Thumbprint)) is not in this computer's certificate store."
+            } elseif (-not $certInfo.KeyUsable) {
+                Drop-SignInRung ("The automatic-refresh certificate is in this computer's store, but {0}. Re-run setup as an administrator to set it up again." -f $certInfo.KeyWhy)
             } else {
                 Write-Host 'Connecting to Microsoft Graph as the registered app (read-only)...'
                 Add-StatusLine 'signin' 'Signing in as the registered app - no window needed.'
@@ -577,7 +647,7 @@ if (-not $needGraph) {
                     $script:GraphConnectedByUs = $true
                     $script:SignIn.Mode = 'app'
                 } catch {
-                    Drop-SignInRung "Signing in as the registered app failed: $($_.Exception.Message)"
+                    Drop-SignInRung ("Signing in as the registered app failed: " + (Get-CertSignInWords $_.Exception.Message))
                 }
             }
         }
@@ -637,6 +707,33 @@ if (-not $needGraph) {
     }
 }
 $signedIn = $script:SignIn.Mode -ne 'none'
+
+# What this sign-in can actually reach. A tenant can decline to consent to
+# some of the scopes above (Intune is the usual one) and still sign in
+# happily. The collectors check for themselves before touching an endpoint -
+# calling one you were not granted makes the Graph SDK open a sign-in window
+# mid-run, behind whatever you are looking at - but the person deserves to be
+# told once, here, rather than wondering why a section is empty.
+if ($signedIn -and $script:SignIn.Mode -ne 'existing') {
+    try {
+        $granted = @((Get-MgContext).Scopes)
+        $missing = @($scopes | Where-Object { $_ -notin $granted })
+        if ($granted.Count -and $missing.Count) {
+            $friendly = @{
+                'DeviceManagementConfiguration.Read.All' = 'Intune'
+                'DeviceManagementManagedDevices.Read.All' = 'Intune'
+                'DeviceManagementApps.Read.All'           = 'Intune'
+                'AuditLog.Read.All'                       = 'sign-in history (MFA coverage, stale accounts, legacy auth)'
+            }
+            $areas = @($missing | ForEach-Object { if ($friendly[$_]) { $friendly[$_] } else { $_ } } | Sort-Object -Unique)
+            $line = "This sign-in was not granted everything, so these are skipped: $($areas -join '; '). Everything else is collected as normal."
+            Write-Warning $line
+            Add-StatusLine 'signin' $line
+            $script:SignIn.Missing = $missing
+        }
+    } catch { }
+}
+
 $notSignedIn = if ($signedIn) { $null } else { 'not signed in' }
 
 function Write-RefreshStatus {
@@ -651,7 +748,7 @@ function Write-RefreshStatus {
         Final        = $Final
         Ok           = $Ok
         Message      = (@($Summary) -join ' ')
-        SignIn       = [ordered]@{ Mode = $script:SignIn.Mode; Ok = $script:SignIn.Ok; Detail = $script:SignIn.Detail; Dropped = @($script:SignIn.Dropped) }
+        SignIn       = [ordered]@{ Mode = $script:SignIn.Mode; Ok = $script:SignIn.Ok; Detail = $script:SignIn.Detail; Dropped = @($script:SignIn.Dropped); Missing = @($script:SignIn.Missing) }
         Steps        = @($results.ToArray() | ForEach-Object { [ordered]@{ Step = $_.Step; Status = $_.Status; Detail = $_.Detail } })
         Schedule     = [ordered]@{ Mode = $schedMode; Time = $schedTime; RunAs = $schedRunAs }
         KeepSignedIn = [bool]$keepSignedIn
@@ -686,8 +783,9 @@ Invoke-Step -Name 'entra-security-snapshot' -Skip:($SkipSecurity -or -not $signe
     -SkipReason $(if ($SkipSecurity) { '' } else { $notSignedIn }) `
     -ScriptPath (Join-Path $ToolRoot 'entra-security-snapshot\Get-EntraSecuritySnapshot.ps1') `
     -Arguments @{
-        JsonPath  = (Join-Path $OutputRoot 'security-snapshot.json')
-        StaleDays = $StaleDays
+        JsonPath          = (Join-Path $OutputRoot 'security-snapshot.json')
+        StaleDays         = $StaleDays
+        TimeBudgetMinutes = $SecurityBudgetMinutes
     }
 Update-StatsFromOutputs
 Save-HistorySnapshot -Step 'entra-security-snapshot' -Prefix 'security' `
@@ -882,8 +980,13 @@ Write-RefreshStatus -Final $true -Ok (-not ($failed.Count -or $missing.Count)) -
 # saved sign-in to protect, and nothing to keep.
 if ($script:GraphConnectedByUs) {
     if ($script:SignIn.Mode -eq 'user' -and $keepSignedIn) {
-        Write-Host 'Staying signed in to Microsoft Graph for the next automatic refresh.'
-        Write-Host '  (To sign out, re-run setup and choose "I will click Refresh myself".)'
+        if ($Scheduled) {
+            Write-Host 'Staying signed in to Microsoft Graph for the next automatic refresh.'
+            Write-Host '  (To sign out, re-run setup and choose "I will click Refresh myself".)'
+        } else {
+            Write-Host 'Staying signed in to Microsoft 365 (read-only), so the next Refresh does not ask again.'
+            Write-Host '  (To sign out now, run: Disconnect-MgGraph)'
+        }
     } else {
         try { Disconnect-MgGraph -ErrorAction Stop | Out-Null; Write-Host 'Signed out of Microsoft Graph.' }
         catch { Write-Warning "Could not sign out of Graph cleanly ($($_.Exception.Message))." }

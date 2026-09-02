@@ -61,7 +61,11 @@ def main():
     models["identity"] = model.identity_model(feeds["tenant"], feeds.get("run_summary"))
     models["security"] = model.security_model(feeds["security"], models["identity"])
     models["licensing"] = model.licensing_model(feeds["licensing"])
-    models["fleet"] = model.fleet_model(feeds["fleet"])
+    # The bundled sample is a snapshot of one moment. Render it as of that
+    # moment, or the demo shows every printer offline a few days after the
+    # sample was made - which is a lie about the tool, not about the data.
+    fleet_now = model.fleet_as_of(feeds["fleet"]) if args.sample else None
+    models["fleet"] = model.fleet_model(feeds["fleet"], now=fleet_now)
     # Where the printer collector looks, and what each place found.
     models["discovery"] = model.discovery_model(feeds.get("fleet_discovery"))
     models["changes"] = model.changes_model(feeds["history"], feeds.get("run_summary"))
