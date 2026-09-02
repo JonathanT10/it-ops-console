@@ -659,6 +659,260 @@ def test_refresh_render():
     check("refresh render: no footer note without a refresh feed", 'class="refresh-note"' not in page)
 
 
+# --------------------------------------------------------------------------- #
+# Alerts (console/alerts.py)
+# --------------------------------------------------------------------------- #
+
+from console import alerts as A  # noqa: E402
+
+
+def _sample_models():
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg, feeds = load_all(os.path.join(here, "sample", "sources.ini"))
+    models = {}
+    models["identity"] = model.identity_model(feeds["tenant"], feeds.get("run_summary"))
+    models["security"] = model.security_model(feeds["security"], models["identity"])
+    models["licensing"] = model.licensing_model(feeds["licensing"])
+    models["fleet"] = model.fleet_model(feeds["fleet"])
+    models["changes"] = model.changes_model(feeds["history"], feeds.get("run_summary"))
+    models["refresh"] = model.refresh_model(feeds.get("refresh_status"))
+    return models, feeds
+
+
+def _by_rule(fired, rule_id):
+    return [a for a in fired if a["rule"] == rule_id]
+
+
+def test_alerts_catalog_and_config(tmp):
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(here, "alerts.example.ini"), encoding="utf-8") as fh:
+        on_disk = fh.read()
+    check("alerts: alerts.example.ini is exactly what the catalog renders (no drift)",
+          on_disk == A.render_example_ini())
+    cfg = A.load_config(os.path.join(here, "alerts.example.ini"))
+    check("alerts: the example loads with no problems", cfg["problems"] == [] and cfg["exists"])
+    check("alerts: every rule has an ini line", all(("\n%s = " % r.id) in on_disk for r in A.CATALOG))
+    check("alerts: every rule id is unique within its tab", len({r.key for r in A.CATALOG}) == len(A.CATALOG))
+    check("alerts: every rule has label, help and a known severity",
+          all(r.label and r.help and r.severity in A.SEVERITIES for r in A.CATALOG))
+    check("alerts: defaults come through", cfg["rules"]["security.mfa_coverage_below"] == 90
+          and cfg["rules"]["identity.ca_gap_warning"] is False and cfg["send"]["when"] == "changes")
+
+    missing = A.load_config(os.path.join(tmp, "nope.ini"))
+    check("alerts: a missing ini is all defaults and not configured",
+          not missing["exists"] and missing["rules"]["security.admin_without_mfa"] is True
+          and not A.channels_configured(missing, env={})["any"])
+
+    bad = os.path.join(tmp, "bad.ini")
+    with open(bad, "w") as fh:
+        fh.write("[send]\nwhen = sometimes\ndigest_day = Funday\n[teams]\nwebhook = https://x/y\n"
+                 "[security]\nnotify = no\nadmin_without_mfa = maybe\nmfa_coverage_below = lots\n"
+                 "stale_accounts_above =\nno_such_rule = yes\n[kitchen]\nsink = yes\n"
+                 "[email]\nsmtp_server = relay\nfrom = a@b\nto = c@d; e@f, g@h\nport = x\n")
+    b = A.load_config(bad)
+    probs = "\n".join(b["problems"])
+    check("alerts: unknown rule reported, not fatal", "no_such_rule" in probs)
+    check("alerts: unknown section reported", "[kitchen]" in probs)
+    check("alerts: bad when/digest_day reported and defaulted",
+          "not 'changes' or 'every-refresh'" in probs and b["send"]["when"] == "changes"
+          and "not a weekday" in probs and b["send"]["digest_day"] == "")
+    check("alerts: bad switch value reported, default kept",
+          "admin_without_mfa = 'maybe'" in probs and b["rules"]["security.admin_without_mfa"] is True)
+    check("alerts: bad number reported, default kept",
+          "mfa_coverage_below = 'lots'" in probs and b["rules"]["security.mfa_coverage_below"] == 90)
+    check("alerts: blank number means off", b["rules"]["security.stale_accounts_above"] == 0)
+    check("alerts: tab notify=no read", b["tabs"]["security"]["notify"] is False)
+    check("alerts: email recipients split on ; and ,", b["email"]["to"] == ["c@d", "e@f", "g@h"])
+    check("alerts: bad port reported, 25 kept", "port = 'x'" in probs and b["email"]["port"] == 25)
+    ch = A.channels_configured(b, env={})
+    check("alerts: both channels detected", ch["teams"] and ch["email"] and ch["any"])
+    env_only = A.load_config(os.path.join(tmp, "nope.ini"))
+    check("alerts: webhook from the environment counts",
+          A.channels_configured(env_only, env={"ITOPS_TEAMS_WEBHOOK": "https://x"})["teams"])
+    check("alerts: setting text reads plainly",
+          A.rule_setting_text(A.RULES_BY_KEY["security.mfa_coverage_below"], 90) == "90%"
+          and A.rule_setting_text(A.RULES_BY_KEY["licensing.unused_monthly_cost_above"], 0) == "off"
+          and A.rule_setting_text(A.RULES_BY_KEY["licensing.unused_monthly_cost_above"], 500) == "$500"
+          and A.rule_setting_text(A.RULES_BY_KEY["security.admin_without_mfa"], True) == "on")
+
+
+def test_alerts_rules():
+    models, feeds = _sample_models()
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = A.load_config(os.path.join(here, "alerts.example.ini"))
+    now = parse_ts("2026-09-02T12:00:00Z")
+    fired = A.evaluate(cfg, models, feeds, now=now)
+    check("rules: every alert has the common shape",
+          all(set(("key", "tab", "rule", "severity", "title", "detail", "action", "transient", "tab_label")) <= set(a)
+              for a in fired))
+    check("rules: sorted critical first", [a["severity"] for a in fired] == sorted(
+        [a["severity"] for a in fired], key=lambda s: A.SEVERITY_RANK[s]))
+    check("rules: admins without MFA -> one alert each, keyed by UPN",
+          len(_by_rule(fired, "admin_without_mfa")) == 2
+          and all("/admin_without_mfa/" in a["key"] and "@" in a["key"] for a in _by_rule(fired, "admin_without_mfa")))
+    check("rules: the alert carries the console's next step",
+          _by_rule(fired, "admin_without_mfa")[0]["action"] == pages.next_step("admin-no-mfa"))
+    exp = _by_rule(fired, "app_credential_expired")
+    check("rules: expired app credential is critical and names the app",
+          len(exp) == 1 and exp[0]["severity"] == "critical" and "HR Sync" in exp[0]["title"])
+    soon = _by_rule(fired, "app_credential_expiring_days")
+    check("rules: expiring credential says how many days", len(soon) == 1 and "expires in 16 days" in soon[0]["title"])
+    check("rules: CA gaps: critical none, warning off by default",
+          not _by_rule(fired, "ca_gap_critical") and not _by_rule(fired, "ca_gap_warning"))
+    check("rules: unused seats 26 > 25 fires", len(_by_rule(fired, "unused_seats_above")) == 1)
+    check("rules: disabled licensed holder fires with the cost",
+          len(_by_rule(fired, "disabled_account_licensed")) == 1
+          and "$48/month" in _by_rule(fired, "disabled_account_licensed")[0]["detail"])
+    check("rules: unused cost rule is off by default (0)", not _by_rule(fired, "unused_monthly_cost_above"))
+    check("rules: printer error critical, offline warning",
+          _by_rule(fired, "device_error")[0]["severity"] == "critical"
+          and _by_rule(fired, "device_offline")[0]["severity"] == "warning")
+    check("rules: supplies below 10% -> one per supply, info", len(_by_rule(fired, "supply_below_percent")) == 4
+          and all(a["severity"] == "info" for a in _by_rule(fired, "supply_below_percent")))
+    check("rules: legacy auth in use fires once with the top protocols",
+          len(_by_rule(fired, "legacy_auth_signins")) == 1
+          and "Authenticated SMTP" in _by_rule(fired, "legacy_auth_signins")[0]["detail"])
+    stale = _by_rule(fired, "data_stale_days")
+    check("rules: stale-data alerts skip the history folders",
+          all("history" not in a["key"] for a in stale) and all("Change log" not in a["title"] for a in stale))
+    check("rules: MFA coverage 93.4 is above 90 - quiet", not _by_rule(fired, "mfa_coverage_below"))
+
+    # Turning knobs changes what fires, and a silenced tab fires nothing.
+    cfg2 = A.load_config(os.path.join(here, "alerts.example.ini"))
+    cfg2["rules"]["identity.ca_gap_warning"] = True
+    cfg2["rules"]["licensing.unused_seats_above"] = 30
+    cfg2["rules"]["fleet.supply_below_percent"] = 5.5
+    cfg2["rules"]["security.mfa_coverage_below"] = 95
+    cfg2["rules"]["licensing.unused_monthly_cost_above"] = 100
+    cfg2["tabs"]["fleet"]["notify"] = False
+    f2 = A.evaluate(cfg2, models, feeds, now=now)
+    check("rules: warning CA gaps on -> two", len(_by_rule(f2, "ca_gap_warning")) == 2
+          and all(a["action"] for a in _by_rule(f2, "ca_gap_warning")))
+    check("rules: raising the seats line silences it", not _by_rule(f2, "unused_seats_above"))
+    check("rules: MFA line at 95 fires with the numbers",
+          len(_by_rule(f2, "mfa_coverage_below")) == 1 and "93.4%" in _by_rule(f2, "mfa_coverage_below")[0]["title"]
+          and "your line is 95%" in _by_rule(f2, "mfa_coverage_below")[0]["title"])
+    check("rules: unused cost above $100 fires with the monthly figure",
+          len(_by_rule(f2, "unused_monthly_cost_above")) == 1 and "$396" in _by_rule(f2, "unused_monthly_cost_above")[0]["title"])
+    check("rules: a silenced tab fires nothing", not [a for a in f2 if a["tab"] == "fleet"])
+
+    # Changes are events: only recent ones, reported as transient.
+    ch_models = dict(models)
+    ch_models["changes"] = {"events": [
+        {"ts": "2026-09-01T09:00:00Z", "category": "Conditional Access", "kind": "changed", "item": "Block legacy", "detail": "enabled -> disabled"},
+        {"ts": "2026-09-01T09:00:00Z", "category": "Role assignments", "kind": "added", "item": "Pat Admin", "detail": "Global Administrator"},
+        {"ts": "2026-08-01T09:00:00Z", "category": "Role assignments", "kind": "added", "item": "Old News", "detail": "Reader"},
+        {"ts": "2026-09-01T09:00:00Z", "category": "App registrations", "kind": "added", "item": "New App", "detail": ""},
+    ], "snapshot_count": 3, "first": None, "last": None}
+    f3 = A.evaluate(cfg, ch_models, feeds, now=now)
+    check("rules: recent CA change and role grant fire, transient",
+          len(_by_rule(f3, "conditional_access")) == 1 and len(_by_rule(f3, "role_assignments")) == 1
+          and all(a["transient"] for a in _by_rule(f3, "role_assignments") + _by_rule(f3, "conditional_access")))
+    check("rules: a change older than the window is not reported",
+          all("Old News" not in a["title"] for a in f3))
+    check("rules: app registration changes are off by default", not _by_rule(f3, "app_registrations"))
+    check("rules: change alerts carry the audit-log next step",
+          "audit log" in _by_rule(f3, "conditional_access")[0]["action"])
+
+    # Refresh rules read refresh-status.json directly.
+    rf = dict(feeds)
+    rf["refresh_status"] = Feed("refresh_status", "Automatic refresh", "x", data={
+        "GeneratedUtc": iso(NOW), "Scheduled": True,
+        "SignIn": {"Mode": "none", "Ok": False, "Detail": "Nobody finished the window.", "Dropped": ["Nobody finished the window."]},
+        "Steps": [{"Step": "sign-in", "Status": "FAILED", "Detail": "x"}, {"Step": "print-fleet-collector", "Status": "FAILED", "Detail": "exit code 1"},
+                  {"Step": "console build", "Status": "ok", "Detail": ""}],
+        "Schedule": {"Mode": "unattended", "Time": "06:30", "RunAs": "SYSTEM"}, "KeepSignedIn": False,
+        "Certificate": {"Thumbprint": "AB", "Present": True, "Expires": "2026-09-14", "DaysLeft": 12}}, ts=NOW)
+    f4 = A.evaluate(cfg, models, rf, now=now)
+    check("rules: could not sign in -> critical", _by_rule(f4, "could_not_sign_in")[0]["severity"] == "critical")
+    check("rules: collector failed -> one per failed step, never sign-in or build",
+          [a["key"] for a in _by_rule(f4, "collector_failed")] == ["refresh/collector_failed/print-fleet-collector"])
+    check("rules: certificate within 30 days -> warning with the days",
+          "expires in 12 days" in _by_rule(f4, "certificate_expiring_days")[0]["title"])
+    rf["refresh_status"].data["SignIn"] = {"Mode": "user", "Ok": True, "Detail": "", "Dropped": ["Signing in as the registered app failed: AADSTS700027."]}
+    rf["refresh_status"].data["Certificate"]["DaysLeft"] = -2
+    f5 = A.evaluate(cfg, models, rf, now=now)
+    check("rules: fell back -> warning; expired certificate -> critical even though the warning line is 30",
+          _by_rule(f5, "could_not_sign_in")[0]["severity"] == "warning"
+          and _by_rule(f5, "certificate_expiring_days")[0]["severity"] == "critical")
+    cfg3 = A.load_config(os.path.join(here, "alerts.example.ini")); cfg3["rules"]["refresh.certificate_expiring_days"] = 0
+    f6 = A.evaluate(cfg3, models, rf, now=now)
+    check("rules: certificate rule at 0 is off entirely", not _by_rule(f6, "certificate_expiring_days"))
+
+
+def test_alerts_state():
+    a1 = {"key": "security/admin_without_mfa/a@x", "tab": "security", "rule": "admin_without_mfa", "severity": "critical", "title": "A", "detail": "", "action": "", "transient": False}
+    a2 = {"key": "fleet/device_offline/10.0.0.1", "tab": "fleet", "rule": "device_offline", "severity": "warning", "title": "B", "detail": "", "action": "", "transient": False}
+    ev = {"key": "changes/role_assignments/x", "tab": "changes", "rule": "role_assignments", "severity": "warning", "title": "E", "detail": "", "action": "", "transient": True}
+    t0 = parse_ts("2026-09-01T07:00:00Z")
+    state = A.empty_state()
+    d = A.diff_state([a1, a2, ev], state)
+    check("state: everything is new on the first run", len(d["new"]) == 3 and not d["worse"] and not d["cleared"])
+    # nothing was sent (say the webhook was down): they must stay 'new'
+    A.apply_state(state, [a1, a2, ev], d, notified=False, now=t0)
+    d = A.diff_state([a1, a2, ev], state)
+    check("state: untold alerts stay new next time", len(d["new"]) == 3)
+    check("state: first_seen recorded even when untold", state["alerts"][a1["key"]]["first_seen"] == "2026-09-01T07:00:00Z")
+    A.apply_state(state, [a1, a2, ev], d, notified=True, now=parse_ts("2026-09-01T08:00:00Z"))
+    d = A.diff_state([a1, a2, ev], state)
+    check("state: told alerts are 'still', nothing new", not d["new"] and len(d["still"]) == 3)
+    check("state: first_seen kept across runs", state["alerts"][a1["key"]]["first_seen"] == "2026-09-01T07:00:00Z")
+    worse = dict(a2, severity="critical")
+    d = A.diff_state([a1, worse], state)
+    check("state: severity rise -> worse; nothing cleared while it is still firing",
+          [x["key"] for x in d["worse"]] == [a2["key"]] and d["cleared"] == [])
+    check("state: event absence is not a 'cleared'", all(c["key"] != ev["key"] for c in d["cleared"]))
+    d2 = A.diff_state([a1], state)
+    check("state: vanished state is cleared with its old severity",
+          [c["key"] for c in d2["cleared"]] == [a2["key"]] and d2["cleared"][0]["severity"] == "warning")
+    A.apply_state(state, [a1], d2, notified=True, now=parse_ts("2026-09-02T07:00:00Z"))
+    check("state: cleared and aged-out entries are pruned", set(state["alerts"]) == {a1["key"]})
+
+
+def test_alerts_page():
+    models, feeds = _sample_models()
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = A.load_config(os.path.join(here, "sample", "alerts.ini"))
+    fired = A.evaluate(cfg, models, feeds, now=parse_ts("2026-09-02T12:00:00Z"))
+    state = {"alerts": {}, "last_sent": "2026-08-31T07:01:12Z", "last_digest": "2026-08-31",
+             "history": [{"when": "2026-08-31T07:01:12Z", "title": "IT Ops Console weekly summary: 12 open", "channels": ["teams"]}]}
+    am = pages.alerts_page_model(fired, cfg, state, A.channels_configured(cfg, env={}))
+    avail = {"index": True, "alerts": True}
+    html = pages.build_alerts(am, avail, "now")
+    check("alerts page: renders the four sections",
+          all(h in html for h in ("Where alerts go", "Firing now", "What is watched", "alerts.ini")))
+    check("alerts page: says Teams is connected and when messages go",
+          "connected - a Workflows URL is set" in html and "only when an alert appears, gets worse, or clears" in html)
+    check("alerts page: shows the last message and history", "2026-08-31 07:01 UTC" in html and "weekly summary: 12 open" in html)
+    check("alerts page: firing rows carry severity badge, title and next step",
+          'class="badge" style="color:var(--critical)"' in html and "Admin without MFA:" in html
+          and "aka.ms/mfasetup" in html)
+    check("alerts page: rules table lists every rule with its setting",
+          all(esc_label in html for esc_label in ("An admin has no MFA", "MFA coverage falls below", "90%", "25 seats"))
+          and html.count('class="rules"') == len(A.TABS))
+    check("alerts page: off rules shown muted", 'class="set off">off' in html)
+    check("alerts page: no setup banner when a channel exists", "not sent anywhere yet" not in html)
+
+    none = A.load_config(os.path.join(here, "nope-alerts.ini"))
+    am2 = pages.alerts_page_model(fired, none, None, A.channels_configured(none, env={}))
+    html2 = pages.build_alerts(am2, avail, "now")
+    check("alerts page: no channel -> plain setup banner naming the file and the test command",
+          "not sent anywhere yet" in html2 and "nope-alerts.ini" in html2 and "notify.py --test" in html2)
+    check("alerts page: missing ini explained, defaults in force", "No alerts.ini yet" in html2)
+    bad = dict(none); bad["problems"] = ["[security] 'typo' is not a rule this console knows - see alerts.example.ini for the list."]
+    bad["exists"] = True
+    bad["tabs"] = {t: {"notify": (t != "fleet")} for t, _ in A.TABS}
+    am3 = pages.alerts_page_model([], bad, None, A.channels_configured(bad, env={}))
+    html3 = pages.build_alerts(am3, avail, "now")
+    check("alerts page: unusable lines listed", "could not be used as written" in html3 and "&#x27;typo&#x27;" in html3)
+    check("alerts page: silenced tab labelled", "this tab is silenced" in html3)
+    check("alerts page: nothing firing says so calmly", "Nothing - every rule that is on is quiet." in html3)
+    hostile = [{"key": "k", "tab": "security", "rule": "admin_without_mfa", "severity": "critical",
+                "title": "<script>alert(1)</script>", "detail": "<b>x</b>", "action": "", "transient": False}]
+    am4 = pages.alerts_page_model(hostile, none, None, A.channels_configured(none, env={}))
+    check("alerts page: alert text escaped", "<script>" not in pages.build_alerts(am4, avail, "now"))
+
+
 def _all_pages(models, feeds, available):
     gen = "2026-01-01 00:00:00"
     return {
@@ -668,6 +922,7 @@ def _all_pages(models, feeds, available):
         "licensing": pages.build_licensing(models["licensing"], feeds["licensing"], available, gen),
         "fleet": pages.build_fleet(models["fleet"], feeds["fleet"], available, gen),
         "changes": pages.build_changes(models["changes"], feeds["history"], available, gen),
+        "alerts": pages.build_alerts(models.get("alerts"), available, gen),
     }
 
 
@@ -679,7 +934,7 @@ def test_render_empty_console():
     available = {"index": True, "identity": False, "security": False,
                  "licensing": False, "fleet": False, "changes": False}
     out = _all_pages(models, feeds, available)
-    check("render: all 6 pages render with zero feeds", len(out) == 6)
+    check("render: all 7 pages render with zero feeds", len(out) == 7)
     check("render: every page is a full document",
           all(h.startswith("<!DOCTYPE html>") and h.rstrip().endswith("</html>")
               for h in out.values()))
@@ -747,7 +1002,7 @@ def test_render_full(tmp):
     check("render: sample build exits clean", rc == 0)
     site = os.path.join(tmp, "site")
     names = sorted(os.listdir(site)) if os.path.isdir(site) else []
-    check("render: six pages written", len(names) == 6)
+    check("render: seven pages written", len(names) == 7)
     with open(os.path.join(site, "index.html"), encoding="utf-8") as fh:
         idx = fh.read()
     check("render: overview links every domain",
@@ -776,6 +1031,10 @@ def main():
         test_changes_model()
         test_refresh_model()
         test_refresh_render()
+        test_alerts_catalog_and_config(tmp)
+        test_alerts_rules()
+        test_alerts_state()
+        test_alerts_page()
         test_render_empty_console()
         test_render_escaping()
         test_render_full(tmp)

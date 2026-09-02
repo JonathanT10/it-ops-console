@@ -271,6 +271,64 @@ $r = Run-Case -Graph 'user-ok' -NoConnect
 Check 'exit 0' ($r.Code -eq 0)
 Check 'mode existing' ($r.Status.SignIn.Mode -eq 'existing')
 Check 'no Graph calls at all' ($r.Log.Count -eq 0)
+$steps = @{}; foreach ($s in $r.Status.Steps) { $steps[$s.Step] = $s }
+Check 'alerts step skipped in words when no channel is configured' ($steps['alerts'].Status -eq 'skipped' -and $steps['alerts'].Detail -like 'no Teams or email channel*')
+Check 'alerts.json written by the build' (Test-Path (Join-Path $out 'alerts.json'))
+Check 'Alerts page built' (Test-Path (Join-Path $site 'alerts.html'))
+
+Write-Host ''
+Write-Host '-- 11. alerts: a channel configured -> notify.py runs against a local fake webhook'
+$hookLog = Join-Path $work 'hook.log'
+$hookPy = Join-Path $work 'hook.py'
+Set-Content $hookPy @"
+import http.server, json, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length', '0')); body = self.rfile.read(n)
+        open(r'$hookLog', 'a', encoding='utf-8').write(body.decode('utf-8') + '\n')
+        self.send_response(200); self.end_headers(); self.wfile.write(b'1')
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(('127.0.0.1', 0), H)
+print(srv.server_address[1], flush=True)
+srv.serve_forever()
+"@
+$hookProc = Start-Process -FilePath $python -ArgumentList @($hookPy) -PassThru -RedirectStandardOutput (Join-Path $work 'hook.port') -NoNewWindow
+Start-Sleep -Seconds 2
+$port = (Get-Content (Join-Path $work 'hook.port') | Select-Object -First 1).Trim()
+$alertsIni = Join-Path $work 'alerts.ini'
+Set-Content $alertsIni "[send]`nwhen = changes`n[teams]`nwebhook = http://127.0.0.1:$port/hook`n"
+try {
+    # Run-Case passes -RefreshConfig; alerts.ini is picked up from -AlertsConfig here by running the command directly.
+    Remove-Item $out -Recurse -Force; Remove-Item $site -Recurse -Force; $null = New-Item -ItemType Directory -Path $out, $site -Force
+    if (Test-Path (Join-Path $out 'alerts-state.json')) { Remove-Item (Join-Path $out 'alerts-state.json') }
+    Remove-Item $ini -ErrorAction SilentlyContinue
+    $env:ITOPS_STUB_GRAPH = 'user-ok'; $env:ITOPS_STUB_CERT_NOTAFTER = ''
+    $cmd = $preamble + "`n& '$repo/run-all.ps1' -ToolRoot '$tools' -OutputRoot '$out' -SitePath '$site' -ConfigPath '$cfg' -RefreshConfig '$ini' -AlertsConfig '$alertsIni' -Python $python -NoStatusPage -Scheduled -SignInTimeoutSeconds 30"
+    $text = (& pwsh -NoProfile -Command $cmd 2>&1 | Out-String); $code = $LASTEXITCODE
+    $status = Get-Content (Join-Path $out 'refresh-status.json') -Raw | ConvertFrom-Json
+    $steps = @{}; foreach ($s in $status.Steps) { $steps[$s.Step] = $s }
+    Check 'exit 0 with alerts sent' ($code -eq 0 -and $steps['alerts'].Status -eq 'ok')
+    Check 'one card posted to the webhook' ((Test-Path $hookLog) -and @(Get-Content $hookLog).Count -eq 1)
+    $card = (Get-Content $hookLog -Raw | ConvertFrom-Json)
+    $cardText = ($card.attachments[0].content.body | ForEach-Object { $_.text }) -join "`n"
+    Check 'card announces new alerts from the sample data' ($cardText -like 'IT Ops Console: * new*' -and $cardText -like '*Admin without MFA*')
+    Check 'alerts-state.json written' (Test-Path (Join-Path $out 'alerts-state.json'))
+    Check 'plain words on screen' ($text -like '*Sent to Teams.*')
+    # second run: nothing changed -> no post, step still ok
+    $text = (& pwsh -NoProfile -Command $cmd 2>&1 | Out-String); $code = $LASTEXITCODE
+    Check 'second run: quiet, still exit 0' ($code -eq 0 -and @(Get-Content $hookLog).Count -eq 1 -and $text -like '*No alert sent*')
+    # webhook gone: the step fails in plain words, the console is still built, exit 1
+    Stop-Process -Id $hookProc.Id -Force; Start-Sleep -Seconds 1; $hookProc = $null
+    Copy-Item (Join-Path $repo 'sample/feeds/security-snapshot.json') (Join-Path $out 'security-snapshot.json')   # keep data current
+    Remove-Item (Join-Path $out 'alerts-state.json')
+    $text = (& pwsh -NoProfile -Command $cmd 2>&1 | Out-String); $code = $LASTEXITCODE
+    $status = Get-Content (Join-Path $out 'refresh-status.json') -Raw | ConvertFrom-Json
+    $steps = @{}; foreach ($s in $status.Steps) { $steps[$s.Step] = $s }
+    Check 'unreachable webhook: alerts step FAILED, console built, exit 1' ($code -eq 1 -and $steps['alerts'].Status -eq 'FAILED' -and $steps['console build'].Status -eq 'ok')
+    Check 'plain words name the Workflows URL' ($text -like '*alerts: The alert message could not be sent - check the Teams Workflows URL*')
+} finally {
+    if ($hookProc) { Stop-Process -Id $hookProc.Id -Force -ErrorAction SilentlyContinue }
+}
 
 Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
