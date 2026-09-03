@@ -42,12 +42,19 @@ function Check { param([string]$Label, [bool]$Cond)
 # what people actually run.
 $setup = Join-Path $repo 'setup.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($setup, [ref]$null, [ref]$null)
-$fn = $ast.Find({ param($n)
-    $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Install-FromBundle'
-}, $true)
-if (-not $fn) { Write-Host 'FAIL setup.ps1 no longer defines Install-FromBundle'; exit 1 }
-. ([scriptblock]::Create($fn.Extent.Text))
-Check 'the function comes from the shipped setup.ps1' ($null -ne (Get-Command Install-FromBundle -ErrorAction SilentlyContinue))
+$wanted = @('Get-BundleFileList', 'Get-HeldFile', 'Copy-BundleOverTop', 'Install-FromBundle')
+$defs = @{}
+foreach ($f in $ast.FindAll({ param($n)
+    $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+    if ($wanted -contains $f.Name) { $defs[$f.Name] = $f.Extent.Text }
+}
+foreach ($name in $wanted) {
+    if (-not $defs.ContainsKey($name)) { Write-Host "FAIL setup.ps1 no longer defines $name"; exit 1 }
+    . ([scriptblock]::Create($defs[$name]))
+}
+Check 'the functions come from the shipped setup.ps1' (
+    @('Get-BundleFileList','Get-HeldFile','Copy-BundleOverTop','Install-FromBundle' |
+      Where-Object { Get-Command $_ -ErrorAction SilentlyContinue }).Count -eq 4)
 
 function New-Bundle {
     # what a release bundle carries for one tool: code and *.example.ini only
@@ -57,6 +64,12 @@ function New-Bundle {
     Set-Content (Join-Path $Path 'serve-console.py')     "# brand new in this version"
     Set-Content (Join-Path $Path 'alerts.example.ini')   "[teams]`nwebhook ="
     Set-Content (Join-Path $Path 'config.example.ini')   "[ranges]"
+    # a stand-in for the page builder, so the test can see HOW setup calls it
+    Set-Content (Join-Path $Path 'build.py') @'
+import sys, os
+out = sys.argv[sys.argv.index("--out") + 1]
+open(os.path.join(out, "built.txt"), "w").write(" ".join(sys.argv[1:]) + "\ncwd=" + os.getcwd())
+'@
     $null = New-Item -ItemType Directory -Path (Join-Path $Path 'console') -Force
     Set-Content (Join-Path $Path 'console/pages.py')     "# v-new"
 }
@@ -123,15 +136,16 @@ Check 'and it is gone from the backup too' (-not (Test-Path (Join-Path $backup '
 Check 'the ones you kept are still there' ((Get-Content (Join-Path $dest 'alerts.ini') -Raw) -like '*MINE*')
 
 Write-Host ''
-Write-Host '-- 5. THE BUG: the folder cannot be replaced'
+Write-Host '-- 5. THE BUG: the folder cannot be renamed out of the way'
 # How the failure is forced: a Move-Item that refuses for one named folder.
 # On Windows the real cause is a process using the directory - a rename against
 # an open directory fails. This container cannot create that condition (it is
 # Linux, and running as root at that), so what is proven here is the CONTRACT
-# the fix rests on: when the rename fails, for whatever reason, nothing has
-# been touched and the message says what to close. That is deliberate - the
-# same class of gap as the Windows ExitCode bug in v1.5.4 - which is why the
-# fix is shaped so a failure is harmless rather than relying on detection.
+# the fix rests on, not the Windows detection itself. That is deliberate - the
+# same class of gap as the Windows ExitCode bug in v1.5.4.
+# The stand-in for the refusal. On Windows the real cause is a process using
+# the directory - a rename against an open directory fails. This container is
+# Linux, and running as root at that, so it cannot create that condition.
 function Move-Item {
     # $global:, not $script: - inside a function, $script: resolves against the
     # scope of whatever script is RUNNING, so when setup.ps1 calls this the name
@@ -144,45 +158,57 @@ function Move-Item {
     [CmdletBinding()]
     param([string]$LiteralPath, [string]$Path, [string]$Destination, [switch]$Force)
     $src = if ($LiteralPath) { $LiteralPath } else { $Path }
+    # FailMoveTimes stands in for a holder that is only passing through - a
+    # scanner, the indexer - which is what the retry exists for.
+    if ($global:FailMoveTimes -gt 0) {
+        $global:FailMoveTimes--
+        throw "The process cannot access the file '$src' because it is being used by another process."
+    }
     if ($global:LockedName -and $src -like "*$global:LockedName*") {
         throw "The process cannot access the file '$src' because it is being used by another process."
     }
     Microsoft.PowerShell.Management\Move-Item -LiteralPath $src -Destination $Destination -Force:$Force
 }
-# The mock must reach the real thing when it is not refusing - proven here, so a
-# broken mock can never make the cases below pass by failing early.
+# The stand-in must reach the real thing when it is not refusing - proven here,
+# so a broken stand-in can never make the cases below pass by failing early.
 $probe = Join-Path $work 'mockprobe'
 $null = New-Item -ItemType Directory -Path (Join-Path $probe 'from') -Force
 Set-Content (Join-Path $probe 'from/x.txt') 'hello'
 $global:LockedName = $null
+$global:FailMoveTimes = 0
 Move-Item -LiteralPath (Join-Path $probe 'from') -Destination (Join-Path $probe 'to') -ErrorAction Stop
 Check 'the stand-in Move-Item really moves when it is not refusing' (
     (Test-Path (Join-Path $probe 'to/x.txt')) -and -not (Test-Path (Join-Path $probe 'from')))
+# ...and that it really refuses when it should, so a silent no-op cannot pass either
+$global:LockedName = 'mockprobe'
+$refused = $false
+try { Move-Item -LiteralPath (Join-Path $probe 'to') -Destination (Join-Path $probe 'to2') -ErrorAction Stop }
+catch { $refused = $true }
+Check 'and really refuses when it should' ($refused -and (Test-Path (Join-Path $probe 'to/x.txt')))
 
 $global:LockedName = 'demo'
+$global:FailMoveTimes = 0
 $root = Join-Path $work 'c'; $tools = Join-Path $root 'tools'
 $bundle = Join-Path $work 'c-bundle'; $dest = Join-Path $tools 'demo'
 $null = New-Item -ItemType Directory -Path $tools -Force
 New-Bundle $bundle; New-Installed $dest
-$before = @(Get-ChildItem -Path $dest -Recurse | ForEach-Object { $_.FullName }) | Sort-Object
 $err = ''
+$out = ''
 try {
-    Install-FromBundle -Name 'demo' -Source $bundle -Dest $dest -BackupRoot (Join-Path $root '.settings-backup') | Out-Null
-    $err = '(it did not fail at all)'
+    $out = (Install-FromBundle -Name 'demo' -Source $bundle -Dest $dest -BackupRoot (Join-Path $root '.settings-backup') *>&1 | Out-String)
 } catch { $err = $_.Exception.Message }
-$after = @(Get-ChildItem -Path $dest -Recurse | ForEach-Object { $_.FullName }) | Sort-Object
-Check 'it fails rather than half-replacing' ($err -ne '' -and $err -ne '(it did not fail at all)')
-Check 'NOTHING was deleted - every file is still there' (($after -join '|') -eq ($before -join '|'))
-Check 'your old version still runs' ((Get-Content (Join-Path $dest 'run-all.ps1') -Raw).Trim() -eq '# v-old')
+Check 'a folder that cannot be moved aside is still updated' ($err -eq '')
+Check 'and you get this version, not the last one' (
+    (Get-Content (Join-Path $dest 'run-all.ps1') -Raw).Trim() -eq '# v-new')
+Check 'including files new in it' (Test-Path (Join-Path $dest 'serve-console.py'))
 Check 'your settings are untouched' ((Get-Content (Join-Path $dest 'alerts.ini') -Raw) -like '*MINE*')
 Check 'and were copied somewhere you can find' (
     Test-Path (Join-Path (Join-Path $root '.settings-backup') 'demo/alerts.ini'))
-Check 'it says nothing was changed' ($err -like '*nothing was changed*')
-Check 'it names the window that most often causes it' ($err -like '*Refresh IT Ops Data*')
-Check 'it names the console itself, which now holds that folder while it serves' ($err -like '*IT Ops Console*')
-Check 'it says what to do next' ($err -like '*run this setup again*')
-Check 'it points at the settings copy' ($err -like '*.settings-backup*')
-Check 'nothing is left half-renamed' (@(Get-ChildItem -Path $tools -Directory -Filter 'demo.replaced-*').Count -eq 0)
+Check 'it says it wrote in place rather than pretending it was a clean swap' (
+    $out -like '*updated in place*')
+Check 'and admits what writing in place cannot do' ($out -like '*may still*')
+Check 'nothing is left half-renamed' (
+    @(Get-ChildItem -Path $tools -Directory -Filter 'demo.replaced-*').Count -eq 0)
 
 Write-Host ''
 Write-Host '-- 5b. the fresh copy itself fails: put back what was there'
@@ -210,6 +236,7 @@ Check 'nothing is left renamed aside' (@(Get-ChildItem -Path $tools -Directory -
 Write-Host ''
 Write-Host '-- 6. ONE tool that cannot be replaced does not take the install down'
 $global:LockedName = 'print-fleet-dashboard'
+$global:FailMoveTimes = 0
 $root = Join-Path $work 'd'
 $stage = Join-Path $work 'd-stage'
 $REPOS = @('entra-tenant-docs', 'entra-security-snapshot', 'm365-license-waste-report',
@@ -220,6 +247,13 @@ Copy-Item $setup (Join-Path $stage 'setup.ps1')
 # an existing install of every tool, so each one is an UPDATE
 $null = New-Item -ItemType Directory -Path (Join-Path $root 'tools') -Force
 foreach ($r in $REPOS) { New-Installed (Join-Path (Join-Path $root 'tools') $r) }
+# ...and in ONE of them, a file that cannot be written either, so it is a real
+# hard failure rather than an in-place update
+$null = New-Item -ItemType Directory -Force -Path (
+    Join-Path (Join-Path (Join-Path $root 'tools') 'print-fleet-dashboard') 'serve-console.py')
+# data already collected, so setup has something to rebuild the pages from
+$null = New-Item -ItemType Directory -Path (Join-Path $root 'output') -Force
+Set-Content (Join-Path $root 'output/tenant.json') '{}'
 # Run the WHOLE of setup in this scope, so the refusing Move-Item above is what
 # it calls. -Unattended answers every question and skips the schedule step.
 $text = (& (Join-Path $stage 'setup.ps1') -Root $root -Unattended *>&1 | Out-String)
@@ -228,7 +262,7 @@ Check 'setup still runs to the end' ($text -like '*Setup complete*')
 Check 'it names the one tool it could not update' ($text -like '*print-fleet-dashboard was NOT updated*')
 # Not "Refresh IT Ops Data" - setup's ordinary closing text says that too, and a
 # check that passes on a run where nothing failed is worse than no check.
-Check 'and says what to close' ($text -like '*close any File Explorer window*')
+Check 'and says what to close' ($text -like '*File Explorer window*')
 Check 'the other four DID update' (
     @($REPOS | Where-Object {
         $_ -ne 'print-fleet-dashboard' -and
@@ -236,12 +270,103 @@ Check 'the other four DID update' (
     }).Count -eq 4)
 Check 'the one that failed is untouched, old version and all' (
     (Get-Content (Join-Path (Join-Path $root 'tools') 'print-fleet-dashboard/run-all.ps1') -Raw).Trim() -eq '# v-old')
+Check 'and it named the file, not just the folder' ($text -like '*serve-console.py*')
 Check 'and sums it up in one line at the end' ($text -like '*Not updated: print-fleet-dashboard*')
 Check 'it says the settings are safe' ($text -like '*settings are safe*')
 Check 'every settings file came through, updated or not' (
     @($REPOS | Where-Object {
         (Get-Content (Join-Path (Join-Path $root 'tools') "$_/alerts.ini") -Raw) -like '*MINE*'
     }).Count -eq $REPOS.Count)
+
+# The pages a person looks at are BUILT. After an update the ones on disk were
+# made by the PREVIOUS version, so its buttons and wording are what they see
+# until something rebuilds them - which normally means waiting for a refresh.
+# That is how a whole afternoon went on "the Apply button does not work".
+$built = Join-Path $root 'console-site/built.txt'
+Check 'setup rebuilt the console pages, so they match what it just installed' (Test-Path $built)
+$args_ = if (Test-Path $built) { Get-Content $built -Raw } else { '' }
+Check 'it built from the wiring file it just wrote' ($args_ -like '*--config sources.ini*')
+Check 'into the console folder people actually open' ($args_ -like "*--out*console-site*")
+Check 'and ran it from the tool folder, so relative paths mean what they say' (
+    $args_ -like '*cwd=*it-ops-console*')
+
+Write-Host ''
+Write-Host '-- 7. a holder that is only passing through: try again before giving up'
+$global:LockedName = $null
+$global:FailMoveTimes = 2
+$root = Join-Path $work 'f'; $tools = Join-Path $root 'tools'
+$bundle = Join-Path $work 'f-bundle'; $dest = Join-Path $tools 'demo'
+$null = New-Item -ItemType Directory -Path $tools -Force
+New-Bundle $bundle; New-Installed $dest
+Install-FromBundle -Name 'demo' -Source $bundle -Dest $dest -BackupRoot (Join-Path $root '.settings-backup') | Out-Null
+Check 'it kept trying instead of failing on the first refusal' ($global:FailMoveTimes -eq 0)
+Check 'and the update went through normally' (
+    (Get-Content (Join-Path $dest 'run-all.ps1') -Raw).Trim() -eq '# v-new')
+Check 'a file deleted upstream still goes, so it really was the whole-folder path' (
+    -not (Test-Path (Join-Path $dest 'apply-settings.ps1')))
+Check 'your settings survived' ((Get-Content (Join-Path $dest 'alerts.ini') -Raw) -like '*MINE*')
+
+Write-Host ''
+Write-Host '-- 8. held for real, AND what is installed is already broken'
+# Refusing outright is right while what is there still works. It is the wrong
+# answer when a half-finished update already broke it - refusing for ever is
+# then the same as never fixing it. This is the case that stranded a real
+# machine: folder held open, and run-all.ps1 already gone.
+$global:FailMoveTimes = 0
+$global:LockedName = 'demo'
+$root = Join-Path $work 'g'; $tools = Join-Path $root 'tools'
+$bundle = Join-Path $work 'g-bundle'; $dest = Join-Path $tools 'demo'
+$null = New-Item -ItemType Directory -Path $tools -Force
+New-Bundle $bundle; New-Installed $dest
+Remove-Item (Join-Path $dest 'run-all.ps1')          # the half-deleted state
+Remove-Item (Join-Path $dest 'console/pages.py')
+$err = ''
+try {
+    Install-FromBundle -Name 'demo' -Source $bundle -Dest $dest -BackupRoot (Join-Path $root '.settings-backup') | Out-Null
+} catch { $err = $_.Exception.Message }
+Check 'it did NOT give up on a folder nothing else can fix' ($err -eq '')
+Check 'the missing file is back' (Test-Path (Join-Path $dest 'run-all.ps1'))
+Check 'at the new version' ((Get-Content (Join-Path $dest 'run-all.ps1') -Raw).Trim() -eq '# v-new')
+Check 'the missing subfolder file is back too' (
+    (Get-Content (Join-Path $dest 'console/pages.py') -Raw).Trim() -eq '# v-new')
+Check 'a file new in this version arrived' (Test-Path (Join-Path $dest 'serve-console.py'))
+Check 'your settings were not touched' ((Get-Content (Join-Path $dest 'alerts.ini') -Raw) -like '*MINE*')
+Check 'nothing was renamed aside, because nothing could be' (
+    @(Get-ChildItem -Path $tools -Directory -Filter 'demo.replaced-*').Count -eq 0)
+# writing in place cannot remove what this version dropped - say so, do not hide it
+Check 'a file this version removed is still there (in-place cannot delete)' (
+    Test-Path (Join-Path $dest 'apply-settings.ps1'))
+
+Write-Host ''
+Write-Host '-- 9. held for real, and ONE FILE cannot be written: change nothing, name it'
+# The half-written folder is the one outcome worse than doing nothing, so the
+# in-place path asks the OS first. Here a directory sits where a file belongs,
+# which is a thing [IO.File]::Open cannot open for writing - the same answer it
+# gives for a file another program is holding.
+$global:LockedName = 'demo'
+$root = Join-Path $work 'h'; $tools = Join-Path $root 'tools'
+$bundle = Join-Path $work 'h-bundle'; $dest = Join-Path $tools 'demo'
+$null = New-Item -ItemType Directory -Path $tools -Force
+New-Bundle $bundle; New-Installed $dest
+Remove-Item (Join-Path $dest 'run-all.ps1')
+$null = New-Item -ItemType Directory -Path (Join-Path $dest 'serve-console.py') -Force
+$before = @(Get-ChildItem -Path $dest -Recurse | ForEach-Object { $_.Name + '|' + $_.Length }) | Sort-Object
+$err = ''
+try {
+    Install-FromBundle -Name 'demo' -Source $bundle -Dest $dest -BackupRoot (Join-Path $root '.settings-backup') | Out-Null
+    $err = '(it did not fail at all)'
+} catch { $err = $_.Exception.Message }
+Check 'it refuses rather than writing half a folder' (
+    $err -ne '' -and $err -ne '(it did not fail at all)')
+Check 'it names the FILE, not just "the folder"' ($err -like '*serve-console.py*')
+Check 'it says what to do about that file' ($err -like '*Close whatever has that file*')
+Check 'it says nothing was changed' ($err -like '*nothing was changed*')
+Check 'and nothing WAS changed' (
+    ((@(Get-ChildItem -Path $dest -Recurse | ForEach-Object { $_.Name + '|' + $_.Length }) | Sort-Object) -join ',') -eq ($before -join ','))
+Check 'your settings are still there' ((Get-Content (Join-Path $dest 'alerts.ini') -Raw) -like '*MINE*')
+Check 'and were copied somewhere you can find' (
+    Test-Path (Join-Path (Join-Path $root '.settings-backup') 'demo/alerts.ini'))
+$global:LockedName = $null
 
 Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue

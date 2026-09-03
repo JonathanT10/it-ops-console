@@ -789,7 +789,8 @@ def test_refresh_render():
 
     models["refresh"] = model.refresh_model(_refresh_feed())
     page = pages.build_overview(models, feeds, available, "now")
-    check("refresh render: happy path shows no banner", 'class="banner' not in page)
+    check("refresh render: happy path shows no problem banner, only the file note",
+          page.count('class="banner') == 1 and 'id="filenote"' in page)
 
     models["refresh"] = model.refresh_model(_refresh_feed(
         Ok=False, SignIn={"Mode": "none", "Ok": False, "Detail": "<b>raw</b> detail",
@@ -1282,9 +1283,21 @@ def test_render_full(tmp):
           all(('%s.html' % p) in idx for p in
               ("identity", "security", "licensing", "fleet", "changes")))
     check("render: freshness dot rendered", 'class="dot' in idx)
+    _pages = {}
+    for _n in ("index", "identity", "security", "licensing", "fleet", "changes", "alerts"):
+        with open(os.path.join(site, "%s.html" % _n), encoding="utf-8") as fh:
+            _pages[_n] = fh.read()
+    check("render: every page carries the file note, and it is NOT hidden by default",
+          all('id="filenote"' in h and 'id="filenote" role' in h for h in _pages.values()))
+    check("render: the note says where to go and how to know you got there",
+          all(('IT Ops Console' in h and '127.0.0.1' in h and 'file://' in h)
+              for h in _pages.values()))
+    check("render: and the Refresh bar is the one that starts hidden",
+          all('id="livebar" hidden' in h for h in _pages.values()))
     check("render: sample footer states the automatic-refresh schedule",
           'class="refresh-note">Automatic refresh: every day at 07:00' in idx)
-    check("render: sample overview has no banner (its last refresh worked)", 'class="banner' not in idx)
+    check("render: sample overview has no problem banner (its last refresh worked)",
+          idx.count('class="banner') == 1 and 'id="filenote"' in idx)
     with open(os.path.join(site, "fleet.html"), encoding="utf-8") as fh:
         fleet = fh.read()
     check("render: fleet page has meters", 'class="meter"' in fleet)

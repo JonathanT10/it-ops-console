@@ -179,7 +179,8 @@ Check 'status: not keeping signed in' ($r.Status.KeepSignedIn -eq $false)
 Check 'status: schedule off' ($r.Status.Schedule.Mode -eq 'off')
 Check 'status: final, ok' ($r.Status.Final -eq $true -and $r.Status.Ok -eq $true)
 Check 'collectors ran' ((Test-Path (Join-Path $out 'tenant-docs/tenant.json')) -and (Test-Path (Join-Path $out 'licensing.json')))
-Check 'no banner on the overview' ($r.Index -notlike '*class="banner*')
+Check 'no problem banner on the overview, only the file note' (
+    ([regex]::Matches($r.Index, 'class="banner')).Count -eq 1 -and $r.Index -like '*id="filenote"*')
 
 Write-Host ''
 Write-Host '-- 2. while-signed-in schedule with keep_signed_in: stays signed in'
@@ -231,7 +232,8 @@ Check 'app sign-in always closed' ((Count $r.Log 'disconnect') -eq 1)
 Check 'nothing dropped' (@($r.Status.SignIn.Dropped).Count -eq 0)
 Check 'certificate days left from the store' ($r.Status.Certificate.Present -eq $true -and $r.Status.Certificate.DaysLeft -ge 698 -and $r.Status.Certificate.DaysLeft -le 700)
 Check 'footer note names the app route' ($r.Index -like '*as the registered app, whether or not anyone is signed in*')
-Check 'no banner' ($r.Index -notlike '*class="banner*')
+Check 'no problem banner, only the file note' (
+    ([regex]::Matches($r.Index, 'class="banner')).Count -eq 1 -and $r.Index -like '*id="filenote"*')
 
 Write-Host ''
 Write-Host '-- 5. unattended, certificate EXPIRED, saved sign-in still works: falls through AND says so'
@@ -277,7 +279,8 @@ $r = Run-Case -Graph 'user-fail' -Desktop
 Check 'exit 1' ($r.Code -eq 1)
 Check 'reason recorded' (@($r.Status.SignIn.Dropped)[0] -like 'The sign-in did not complete: InteractiveBrowserCredential*')
 Check 'console built' ($r.Index.Length -gt 0)
-Check 'no banner for an unscheduled run' ($r.Index -notlike '*class="banner*')
+Check 'no problem banner for an unscheduled run' (
+    ([regex]::Matches($r.Index, 'class="banner')).Count -eq 1 -and $r.Index -like '*id="filenote"*')
 Check 'plain words in the summary' ($r.Text -like '*In plain words:*' -and $r.Text -like '*sign-in: The sign-in did not complete*')
 
 Write-Host ''
@@ -296,7 +299,8 @@ Check '9b it says whose sign-in this is, in plain words' ($r.Text -like '*for th
 Check '9b signed in as the person' ($r.Status.SignIn.Mode -eq 'user' -and (Count $r.Log 'connect user*') -eq 1)
 Check '9b STAYS signed in, so the next click does not ask again' ((Count $r.Log 'disconnect') -eq 0)
 Check '9b and says so' ($r.Text -like '*Staying signed in to Microsoft 365*')
-Check '9b no banner - nothing went wrong' ($r.Index -notlike '*class="banner*')
+Check '9b no problem banner - nothing went wrong' (
+    ([regex]::Matches($r.Index, 'class="banner')).Count -eq 1 -and $r.Index -like '*id="filenote"*')
 
 Write-Host ''
 Write-Host '-- 9c. the same machine on its 07:00 schedule still uses the certificate'

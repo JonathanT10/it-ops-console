@@ -92,6 +92,9 @@ def main():
             page.goto(url)
             check("served: the Refresh bar is visible", page.is_visible("#refresh-btn"))
             check("served: the page was given a key", bool(page.evaluate("window.CONSOLE_KEY")))
+            check("served: the file note is nowhere to be seen",
+                  page.is_hidden("#filenote") and "looking at these pages as files"
+                  not in page.inner_text("body"))
 
             page.goto(url.rstrip("/") + "/alerts.html")
             check("served: the settings button says Apply", page.inner_text("#save-btn").strip() == "Apply settings")
@@ -116,6 +119,16 @@ def main():
             page.goto("file://" + os.path.join(site, "index.html"))
             check("as a file: no Refresh button is shown at all",
                   page.is_hidden("#refresh-btn") or page.locator("#refresh-btn").count() == 0)
+            # The whole point: a file-opened page must SAY so, standing, before
+            # anyone clicks anything. Absence of a button is not a message.
+            check("as a file: the note is visible without touching anything",
+                  page.is_visible("#filenote"))
+            note = page.inner_text("#filenote")
+            check("as a file: it says nothing on the page can change anything",
+                  "nothing on them can change anything" in note)
+            check("as a file: it names the icon to use instead", "IT Ops Console" in note)
+            check("as a file: and how to tell you got the real one",
+                  "127.0.0.1" in note and "file://" in note)
             page.goto("file://" + os.path.join(site, "alerts.html"))
             check("as a file: the button still reads Apply settings",
                   page.inner_text("#save-btn").strip() == "Apply settings")
