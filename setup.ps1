@@ -161,6 +161,55 @@ if ($haveBundle -and -not $bundleIsInstall) {
 } else {
     Write-Host '--- 1/6 Downloading the tools ---'
 }
+function Get-BundleFileList {
+    # Every file the bundle would write, as paths relative to the tool folder.
+    param([string]$Source)
+    $n = $Source.Length
+    @(Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
+        $_.FullName.Substring($n).TrimStart('\', '/')
+    })
+}
+
+function Get-HeldFile {
+    <# The first file that cannot be opened for writing, or $null.
+
+       This asks the OS the same question the copy is about to ask, before the
+       copy starts. It is what turns "something is using the folder" into "this
+       one file is open in something", which a person can actually act on - and
+       it is what makes writing in place safe: a half-written tool folder is the
+       one outcome worse than either doing nothing or replacing it whole. #>
+    param([string]$Dest, [string[]]$Relative)
+    foreach ($rel in $Relative) {
+        $p = Join-Path $Dest $rel
+        if (-not (Test-Path -LiteralPath $p)) { continue }   # new file, nothing to hold
+        try {
+            $fs = [IO.File]::Open($p, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $fs.Close(); $fs.Dispose()
+        } catch { return $p }
+    }
+    return $null
+}
+
+function Copy-BundleOverTop {
+    # Write the bundle's files into the folder that is already there, one by
+    # one, then check every one arrived. Nothing is deleted, so a file this
+    # version dropped stays behind - said out loud by the caller.
+    param([string]$Source, [string]$Dest, [string[]]$Relative)
+    foreach ($rel in $Relative) {
+        $to = Join-Path $Dest $rel
+        $dir = Split-Path $to -Parent
+        if (-not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+        Copy-Item -LiteralPath (Join-Path $Source $rel) -Destination $to -Force -ErrorAction Stop
+    }
+    $bad = @()
+    foreach ($rel in $Relative) {
+        $a = Get-Item -LiteralPath (Join-Path $Source $rel)
+        $b = Get-Item -LiteralPath (Join-Path $Dest $rel) -ErrorAction SilentlyContinue
+        if (-not $b -or $b.Length -ne $a.Length) { $bad += $rel }
+    }
+    return $bad
+}
+
 function Install-FromBundle {
     <#
       Replace one tool folder with the bundle's copy, keeping the settings files
@@ -200,15 +249,43 @@ function Install-FromBundle {
             $keep | Copy-Item -Destination $stash -Force
         }
         $aside = "$Dest.replaced-$(Get-Date -Format yyyyMMdd-HHmmss)"
-        try {
-            Move-Item -LiteralPath $Dest -Destination $aside -ErrorAction Stop
-        } catch {
+        # A folder can be held for a moment by something only passing through -
+        # a virus scanner reading what the last tool just wrote, the search
+        # indexer. Three tries over a few seconds gets past those and costs
+        # nothing when nothing is wrong.
+        $renamed = $false
+        for ($try = 1; $try -le 3; $try++) {
+            try { Move-Item -LiteralPath $Dest -Destination $aside -ErrorAction Stop; $renamed = $true; break }
+            catch { if ($try -lt 3) { Start-Sleep -Seconds 2 } }
+        }
+        if (-not $renamed) {
+            $aside = $null
             $where = if ($stash) { " Your settings are also copied to $stash." } else { '' }
-            throw ("Something on this computer is using $Dest, so it could not be replaced " +
-                   "- and nothing was changed. Close any PowerShell window left open by " +
-                   '"Refresh IT Ops Data", close the "IT Ops Console" window if the console ' +
-                   'is running, and close any File Explorer window showing that folder. ' +
-                   "Then run this setup again.$where")
+            # Refusing outright looked right, and is not: it leaves a folder a
+            # half-finished update already broke with no way back, since the
+            # same thing holds it every time. So write the fresh copy over the
+            # top instead - and only after the OS confirms every file can be
+            # written, because a half-written folder is the one outcome worse
+            # than either doing nothing or replacing the lot.
+            $rel = Get-BundleFileList -Source $Source
+            $held = Get-HeldFile -Dest $Dest -Relative $rel
+            if ($held) {
+                throw ("$held is open in another program, so $Name could not be replaced " +
+                       "- and nothing was changed. That is usually a PowerShell window left " +
+                       'open by "Refresh IT Ops Data", the "IT Ops Console" window while the ' +
+                       'console is running, or a File Explorer window showing that folder. ' +
+                       "Close whatever has that file, then run this setup again.$where")
+            }
+            $bad = Copy-BundleOverTop -Source $Source -Dest $Dest -Relative $rel
+            if ($bad.Count) {
+                throw ("$Name is only part replaced - these did not land: $($bad -join ', '). " +
+                       "Close anything using $Dest and run this setup again.$where")
+            }
+            Write-Host "  updated in place: $Name"
+            Write-Host "    (the folder is in use, so the old copy could not be moved aside first."
+            Write-Host "     Everything this version ships is now there; a file it REMOVED may still"
+            Write-Host "     be too. Harmless - close what is using the folder and re-run to tidy.)"
+            return
         }
     }
     try {
@@ -401,12 +478,31 @@ if ((Test-Path (Join-Path $consoleDir 'alerts.example.ini')) -and -not (Test-Pat
     Write-Host "  alerts are OPTIONAL: to get Teams or email messages, edit $((Join-Path $consoleDir 'alerts.ini'))"
 }
 
+# The console's pages are BUILT. After an update the ones sitting on disk were
+# made by the PREVIOUS version, so its wording and its buttons are what you see
+# until something rebuilds them - which normally means waiting for the next
+# refresh. Do it here, when there is data to build from, so an upgrade is not
+# invisible.
+if ($python -and (Test-Path (Join-Path $consoleDir 'build.py')) -and
+    @(Get-ChildItem -Path $output -ErrorAction SilentlyContinue).Count) {
+    $was = Get-Location
+    try {
+        Set-Location $consoleDir
+        $null = & $python 'build.py' '--config' 'sources.ini' '--out' $site 2>&1
+        if ($LASTEXITCODE -eq 0) { Write-Host '  rebuilt the console pages, so they match this version' }
+        else { Write-Warning "  the console pages could not be rebuilt (build.py said $LASTEXITCODE) - the next refresh will." }
+    } catch {
+        Write-Warning "  the console pages could not be rebuilt ($($_.Exception.Message)) - the next refresh will."
+    } finally { Set-Location $was }
+}
+
 # --------------------------------------------------------------------------- #
 Write-Host ''
 Write-Host '--- 5/6 Desktop shortcuts ---'
 if ($onWindows) {
     $shell = New-Object -ComObject WScript.Shell
     $desktop = [Environment]::GetFolderPath('Desktop')
+    $iconOpensFilesOnly = $false
 
     # The console is SERVED from this computer now, by a small local server this
     # icon starts - 127.0.0.1 only, so nothing else on the network can reach it.
@@ -432,7 +528,8 @@ if ($onWindows) {
         # Python is what builds them. The icon still opens whatever was built,
         # and the page itself says why its buttons cannot do anything.
         $lnk.TargetPath = Join-Path $site 'index.html'
-        $lnk.Description = 'Open the IT ops console'
+        $lnk.Description = 'Open the IT ops console pages as files (its buttons will not work)'
+        $iconOpensFilesOnly = $true
     }
     $lnk.Save()
 
@@ -462,6 +559,20 @@ if ($onWindows) {
         }
     }
     Write-Host '  created: "IT Ops Console" and "Refresh IT Ops Data"'
+    # Saying "created" and stopping there would be a lie by omission: that icon
+    # is not the console, it just opens its pages, and every button on them is
+    # dead. Better a loud paragraph now than someone clicking Apply all week.
+    if ($iconOpensFilesOnly) {
+        Write-Warning '  BUT the "IT Ops Console" icon can only OPEN the pages, not run the console:'
+        if (-not $pyExe) {
+            Write-Warning '    Python 3 was not found, and the console is built and served by it.'
+        } else {
+            Write-Warning "    serve-console.py is missing from $consoleDir."
+        }
+        Write-Warning '    Opened that way, "Refresh now" and "Apply settings" cannot do anything.'
+        Write-Warning '    The pages now say so at the top. Fix what is named above, re-run setup,'
+        Write-Warning '    and the icon will start the console properly.'
+    }
 } else {
     Write-Host '  (not Windows - skipping shortcuts)'
 }
