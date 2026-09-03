@@ -322,10 +322,23 @@ def test_fleet_merge():
           "10.0.10.0/24" not in empty and len(ch4) == 2
           and all(k == "removed" for k, _v in ch4))
 
+    # A config.ini written before [ranges] existed. Upgrades keep a person's
+    # own file, so this shape is not hypothetical - it is what every install
+    # older than the feature looks like, and it is the one shape that was
+    # never built here. It reported its rows with an empty kind, and the
+    # words that describe a change raised KeyError on it.
     added, ch5 = A.replace_section_in_ini("[snmp]\ncommunity = public\n", "ranges",
                                           [("Office", "10.0.10.0/24")])
     check("fleet merge: a file with no [ranges] yet gets one",
           "[ranges]" in added and "Office = 10.0.10.0/24" in added and len(ch5) == 1)
+    check("fleet merge: and its rows are reported as ADDED, not as a blank kind",
+          ch5 == [("added", "Office = 10.0.10.0/24")])
+    check("fleet merge: which the words for it can actually say",
+          A.describe_fleet_changes("ranges", ch5) == ["Now looking in Office = 10.0.10.0/24."])
+    # Formatting words must never be what stops an apply.
+    check("fleet merge: a kind nobody knows is described, not raised",
+          A.describe_fleet_changes("ranges", [("who-knows", "Office = 10.0.10.0/24")])
+          == ["Where to look: Office = 10.0.10.0/24."])
 
     words = A.describe_fleet_changes("ranges", changes)
     check("fleet merge: the change list reads as sentences",
@@ -428,6 +441,54 @@ def test_fleet_cli(tmp):
                           ["--dry-run"], fleet_path=fresh2)
     check("fleet cli: a dry run on a fresh install creates nothing",
           code == 0 and "would start one from the example" in out and not os.path.exists(fresh2))
+
+    # A config.ini from BEFORE [ranges] existed - no such section, and an
+    # upgrade keeps a person's own file, so this is what every older install
+    # looks like. This is the shape that crashed in the field: the rows came
+    # back with a blank kind and describe_fleet_changes raised KeyError,
+    # before anything was written - so BOTH halves of the block were lost.
+    OLD_FLEET_INI = """; Copy to config.ini and point at your fleet.
+[snmp]
+community = public
+timeout = 2
+retries = 1
+version = 1
+
+[devices]
+DFW Front Stairs = 192.168.2.32
+iR-ADV C5540 = 192.168.2.33
+"""
+    old_dir = os.path.join(tmp, "older-install")
+    os.makedirs(old_dir, exist_ok=True)
+    old_target = os.path.join(old_dir, "config.ini")
+    with open(old_target, "w", encoding="utf-8") as fh:
+        fh.write(OLD_FLEET_INI)
+    with open(os.path.join(old_dir, "config.example.ini"), "w", encoding="utf-8") as fh:
+        fh.write(REAL_FLEET_INI)
+    # "changes" is deliberately NOT what alerts.ini says by this point, so the
+    # alert half has something real to move - the crash took both halves down.
+    both_kinds = ("[send]\nwhen = changes\n"
+                  "[ranges]\nDFW = 192.168.2.0/24\n"
+                  "[discovery]\nrescan_hours = 12\n")
+    alerts_before = open(alerts_ini, encoding="utf-8").read()
+    code, out = apply_cli(both_kinds, alerts_ini, fleet_path=old_target)
+    old_text = open(old_target, encoding="utf-8").read()
+    check("fleet cli: a config.ini older than [ranges] does not crash",
+          code == 0 and "Traceback" not in out and "KeyError" not in out)
+    check("fleet cli: it says the place was added, in words",
+          "Now looking in DFW = 192.168.2.0/24." in out)
+    check("fleet cli: the section is created and the printers listed by hand survive",
+          "[ranges]" in old_text and "DFW = 192.168.2.0/24" in old_text
+          and "DFW Front Stairs = 192.168.2.32" in old_text
+          and "community = public" in old_text and "version = 1" in old_text)
+    check("fleet cli: [discovery] is created too, not merged into nothing",
+          "[discovery]" in old_text and "rescan_hours = 12" in old_text)
+    check("fleet cli: it still reads as a config file",
+          _reads_as_ini(old_text))
+    check("fleet cli: and the ALERT half of the same block still landed",
+          "when = changes" in open(alerts_ini, encoding="utf-8").read()
+          and open(alerts_ini, encoding="utf-8").read() != alerts_before
+          and "only when something changes" in out)
 
     # the printer tool is not installed at all
     missing = os.path.join(tmp, "nowhere", "config.ini")
