@@ -558,15 +558,13 @@ def test_round_trip(tmp):
         page.fill('[data-sec="send"][data-key="console_link"]', "\\\\fs01\\it\\console")
         edited = page.input_value("#settings-text")
 
-        with page.expect_download() as dl:
-            page.click("#save-btn")
-        download = dl.value
-        saved = download.path()
-        check("round trip: Save hands you a file named for the icon that applies it",
-              download.suggested_filename == "it-ops-settings.txt"
-              and open(saved, encoding="utf-8").read() == edited)
-        check("round trip: Save says what to do next",
-              'double-click "Apply Settings"' in page.inner_text("#save-msg"))
+        # Opened as a file, the page cannot write on this computer, and says so
+        # rather than pretending. The block it built is still exactly right -
+        # that is what the server hands to apply-settings - so apply it directly.
+        page.click("#save-btn")
+        check("round trip: opened as a file, the page says it cannot apply anything",
+              "cannot change anything" in page.inner_text("#save-msg")
+              and 'IT Ops Console' in page.inner_text("#save-msg"))
 
         code, out = apply_cli(edited, target)
         cfg = A.load_config(target)
@@ -687,10 +685,9 @@ def test_fleet_round_trip(tmp):
               and fresh.query_selector('[data-row="name"]').input_value() == ""
               and fresh.query_selector('[data-row="value"]').input_value() == "")
 
-        with page.expect_download() as dl:
-            page.click("#save-btn")
-        check("fleet round trip: Save hands you the same file the icon looks for",
-              dl.value.suggested_filename == "it-ops-settings.txt")
+        page.click("#save-btn")
+        check("fleet round trip: opened as a file, it says so instead of pretending",
+              "cannot change anything" in page.inner_text("#save-msg"))
 
         edited = page.input_value("#settings-text")
         code, out = apply_cli(edited, os.path.join(tmp, "alerts-unused.ini"), fleet_path=target)

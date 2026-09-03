@@ -643,9 +643,11 @@ def test_where_we_look_page():
           and 'data-sec="discovery" data-key="ignore"' in html
           and 'value="10.0.10.99"' in html)
     check("where we look: it says what to do with what you changed",
-          "Save settings" in html and "Apply Settings" in html)
-    check("where we look: exactly one script, and it is the console's own",
-          html.count("<script>") == 1 and "PLACE_PATTERN" in html)
+          "Apply settings" in html and "nothing changes until you do" in html)
+    check("where we look: exactly two scripts - the editor and the Refresh bar, "
+          "both the console's own, and nothing loaded from anywhere",
+          html.count("<script") == 2 and html.count("<script>") == 2
+          and "PLACE_PATTERN" in html and "/api/refresh" in html)
     check("where we look: nothing about SNMP credentials is on the page",
           "public" not in html and "[snmp]" not in html)
 
@@ -1147,9 +1149,9 @@ def test_alerts_page():
     check("alerts page: the send settings are controls too",
           'data-key="when" data-kind="radio" value="changes" checked' in html
           and 'data-key="digest_day"' in html and 'data-key="console_link"' in html)
-    check("alerts page: a save box and the two-step instruction",
+    check("alerts page: a save box and the one-click instruction",
           'id="settings-text"' in html and 'id="save-btn"' in html
-          and "Apply Settings" in html and "<noscript>" in html)
+          and "Apply settings" in html and "<noscript>" in html)
     # console-site is a folder people copy onto shares, so the page must never
     # carry the Workflows URL - and the editor must not offer to change it.
     check("alerts page: the editor never carries where alerts go",
@@ -1179,7 +1181,7 @@ def test_alerts_page():
     h4 = pages.build_alerts(am4, avail, "now")
     check("alerts page: alert text escaped",
           "<script>alert(1)</script>" not in h4 and "&lt;script&gt;alert(1)" in h4
-          and h4.count("<script>") == 1)   # only the editor's own
+          and h4.count("<script>") == 2)   # only the editor's and the Refresh bar's
 
 
 def _all_pages(models, feeds, available):

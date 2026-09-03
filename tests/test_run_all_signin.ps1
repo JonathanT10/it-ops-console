@@ -449,6 +449,21 @@ try {
 }
 
 Write-Host ''
+Write-Host '-- 12. -NoStatusPage still WRITES the live page (the console button lands on it)'
+# -NoStatusPage means "do not open a browser window", not "write no progress".
+# The console's own Refresh button sends you to this page - a run that wrote
+# nothing would leave it saying "waiting for the first step" for ever, or show
+# the previous run's "All done". Every case above ran with -NoStatusPage, so
+# the last one's site is the evidence.
+$pjs = Join-Path $site 'progress.js'
+Check 'progress.js written even with -NoStatusPage' (Test-Path $pjs)
+$pj = if (Test-Path $pjs) { Get-Content $pjs -Raw } else { '' }
+Check 'and it is the finished run, not an empty file' ($pj -like '*window.PROGRESS*' -and $pj -like '*"done"*')
+Check 'the live page itself is beside it' (Test-Path (Join-Path $site 'status.html'))
+$sp = if (Test-Path (Join-Path $site 'status.html')) { Get-Content (Join-Path $site 'status.html') -Raw } else { '' }
+Check 'and it is the current template' ($sp -like "*progress.js?v=*")
+
+Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 $env:ITOPS_STUB_GRAPH = $null; $env:ITOPS_STUB_CERT_NOTAFTER = $null; $env:ITOPS_STUB_LOG = $null
 if ($fails.Count) { Write-Host "RESULT: $($fails.Count) FAILURES"; $fails | ForEach-Object { Write-Host "  - $_" }; exit 1 }
