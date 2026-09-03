@@ -1115,7 +1115,11 @@ def replace_section_in_ini(target_text, section, pairs):
         out.append("[%s]" % section)
         out.extend(new_rows)
         text = "\n".join(out)
-        return (text if text.endswith("\n") else text + "\n"), [("", r) for r in new_rows]
+        # Every row in a section that did not exist is an addition. This said
+        # ("", row) once, which is not a kind anything knows, and the words
+        # that describe a change blew up on it - on the one config.ini shape
+        # the tests never built: one written before [ranges] existed.
+        return (text if text.endswith("\n") else text + "\n"), [("added", r) for r in new_rows]
 
     start, end = body[0], body[-1]
     # The blank line that separated this section from the next one belongs to
@@ -1158,13 +1162,25 @@ def replace_section_in_ini(target_text, section, pairs):
     return text, changes
 
 
+RANGE_CHANGE_WORDS = {
+    "added":   "Now looking in %s.",
+    "removed": "No longer looking in %s.",
+    "changed": "Where to look changed: %s.",
+}
+
+
 def describe_fleet_changes(section, changes):
-    """Plain sentences for what changed in the printer collector's config."""
+    """Plain sentences for what changed in the printer collector's config.
+
+    This only turns changes into words, so it must never be the thing that
+    stops an apply. A kind it does not recognise is reported plainly rather
+    than raised - the settings still land, and the sentence still says what
+    moved.
+    """
     out = []
     for kind, text in changes:
         if section == "ranges":
-            out.append({"added": "Now looking in %s.", "removed": "No longer looking in %s.",
-                        "changed": "Where to look changed: %s."}[kind] % text)
+            out.append((RANGE_CHANGE_WORDS.get(kind) or "Where to look: %s.") % text)
         else:
             out.append("%s: %s." % (section, text))
     return out
