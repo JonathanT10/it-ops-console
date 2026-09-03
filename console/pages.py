@@ -651,7 +651,7 @@ def _where_we_look(discovery):
 
     savebox = (
         '<div class="savebox">'
-        '<button type="button" id="save-btn" class="btn">Save settings</button>'
+        '<button type="button" id="save-btn" class="btn">Apply settings</button>'
         '<span id="save-msg" class="savemsg"></span>'
         '<p class="note">This is exactly what gets applied. Your SNMP community and the '
         'printers you listed by hand are not in it and are never changed from this page.</p>'
@@ -660,8 +660,8 @@ def _where_we_look(discovery):
         '<noscript><p class="note">This page needs JavaScript to build the settings for you. '
         'Without it, edit the [ranges] section of print-fleet-dashboard\'s config.ini.</p></noscript>')
 
-    note = ('<p class="note">%s Then click <b>Save settings</b> and double-click '
-            '<b>Apply Settings</b> on your desktop - nothing changes until you do both.</p>'
+    note = ('<p class="note">%s Then click <b>Apply settings</b> at the bottom - '
+            'nothing changes until you do.</p>'
             '<p class="note">This is a scan: one SNMP request goes to every address in every '
             'place named here. That is ordinary traffic on a network you run, but on some '
             'networks it shows up in monitoring. A place larger than %s addresses is refused '
@@ -886,7 +886,7 @@ EDITOR_JS = r"""
       add(el.getAttribute('data-sec'), el.getAttribute('data-key') + ' = ' + v);
     }
     var lines = ['# IT Ops Console settings, made in the console.',
-                 '# Double-click "Apply Settings" on your desktop to use them.',
+                 '# Clicking "Apply settings" puts each of these where it belongs.',
                  '# Only what is below changes; the rest of your settings files is kept.',
                  ''];
     for (var j = 0; j < order.length; j++) {
@@ -918,25 +918,42 @@ EDITOR_JS = r"""
       build();
     });
   }
-  btn.addEventListener('click', function () {
-    var copied = false;
-    try { out.focus(); out.select(); copied = document.execCommand('copy'); } catch (e) { copied = false; }
-    var saved = false;
-    try {
-      var blob = new Blob([out.value], { type: 'text/plain' });
-      var a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'it-ops-settings.txt';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      saved = true;
-    } catch (e) { saved = false; }
-    var where = saved ? ' A copy is in your Downloads folder.' : '';
-    msg.textContent = copied
-      ? 'Copied. Now double-click "Apply Settings" on your desktop.' + where
-      : 'Select the text below and press Ctrl+C, then double-click "Apply Settings" on your desktop.' + where;
-  });
+  /* The console is served by the "IT Ops Console" icon, and a served page can
+     apply what you changed. A page opened straight off the disk instead - by
+     browsing to the folder, or from an old bookmark - cannot write anything on
+     this computer at all. It says so rather than pretending. */
+  if (window.CONSOLE_KEY) {
+    btn.addEventListener('click', function () {
+      btn.disabled = true;
+      msg.textContent = 'Applying...';
+      fetch('/api/apply', {
+        method: 'POST',
+        headers: { 'X-Console-Key': window.CONSOLE_KEY, 'Content-Type': 'text/plain' },
+        body: out.value
+      }).then(function (r) { return r.json(); })
+        .then(function (d) {
+          btn.disabled = false;
+          var said = (d.message || '').split('\n').map(function (l) { return l.trim(); })
+                        .filter(function (l) { return l; });
+          if (d.ok) {
+            /* what it changed, in its own words - not just the headline */
+            msg.textContent = 'Applied. ' + said.slice(0, 4).join(' ') +
+              ' Click "Refresh now" at the top when you want the console to use it.';
+          } else {
+            msg.textContent = 'Not applied - ' + (said[said.length - 1] || 'the console could not apply that.');
+          }
+        })
+        .catch(function () {
+          btn.disabled = false;
+          msg.textContent = 'Could not reach the console service. Is its window still open?';
+        });
+    });
+  } else {
+    btn.addEventListener('click', function () {
+      msg.textContent = 'This page was opened as a file, so it cannot change anything on ' +
+        'this computer. Open "IT Ops Console" on your desktop and make the change there.';
+    });
+  }
   build();
 })();
 """
@@ -1106,7 +1123,7 @@ def build_alerts(am, available, generated):
 
     savebox = (
         '<div class="savebox">'
-        '<button type="button" id="save-btn" class="btn">Save settings</button>'
+        '<button type="button" id="save-btn" class="btn">Apply settings</button>'
         '<span id="save-msg" class="savemsg"></span>'
         '<p class="note">This is exactly what gets applied. Where alerts go is not in it and is never '
         'changed from this page. Reload the page to go back to the saved settings.</p>'
@@ -1120,8 +1137,8 @@ def build_alerts(am, available, generated):
                '<b>Needs a human</b> on the overview, and what is worth a message. Turning one off '
                'takes it off both - the domain page itself still shows everything. Tick, untick, or '
                'change a number - 0 means off; the box beside a tab name silences that whole tab at '
-               'once. Then click <b>Save settings</b> and double-click <b>Apply Settings</b> on '
-               'your desktop. Nothing here changes until you do both.</p>%s%s%s</section>'
+               'once. Then click <b>Apply settings</b> at the bottom. Nothing here changes '
+               'until you do.</p>%s%s%s</section>'
                % (send_ctl, "".join(tables), savebox))
 
     # -- how the file was read ------------------------------------------- #

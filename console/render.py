@@ -145,6 +145,11 @@ input.wide { width: 320px; max-width: 100%; }
 .btn:hover { background: var(--accent); }
 .savebox { margin-top: 20px; }
 .savemsg { margin-left: 10px; font-size: 13px; color: var(--ink-2); }
+.livebar { margin: 0 0 14px; display: flex; gap: 10px; align-items: center; }
+/* display:flex beats the hidden attribute's own display:none, so a page
+   opened as a FILE would show a Refresh button that cannot do anything. */
+.livebar[hidden] { display: none !important; }
+.livemsg { color: var(--muted); font-size: 13px; }
 .rows { margin: 6px 0 10px; }
 .row { display: flex; gap: 10px; align-items: center; padding: 2px 0; flex-wrap: wrap; }
 .row input[data-row="name"] { width: 200px; }
@@ -391,6 +396,37 @@ def nav(current, available):
     return '<nav class="top"><div class="inner">%s</div></nav>' % "".join(links)
 
 
+# The Refresh button, and the script that makes it work. Both are inert
+# unless the console is being SERVED - a page opened as a file cannot start
+# anything on your computer, and a button that does nothing is worse than no
+# button. Served, window.CONSOLE_KEY exists and the bar appears.
+LIVE_BAR = """<div class="livebar" id="livebar" hidden>
+<button type="button" class="btn" id="refresh-btn">Refresh now</button>
+<span class="livemsg" id="refresh-msg"></span></div>
+<script>
+(function () {
+  var bar = document.getElementById('livebar');
+  var btn = document.getElementById('refresh-btn');
+  var msg = document.getElementById('refresh-msg');
+  if (!bar || !window.CONSOLE_KEY) { return; }   /* opened as a file: stay hidden */
+  bar.hidden = false;
+  function say(t) { msg.textContent = t; }
+  btn.addEventListener('click', function () {
+    btn.disabled = true;
+    say('Starting...');
+    fetch('/api/refresh', { method: 'POST', headers: { 'X-Console-Key': window.CONSOLE_KEY } })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        say(d.message || '');
+        if (d.ok) { setTimeout(function () { location.href = 'status.html'; }, 600); }
+        else { btn.disabled = false; }
+      })
+      .catch(function () { say('Could not reach the console service. Is its window still open?'); btn.disabled = false; });
+  });
+})();
+</script>"""
+
+
 def shell(title, current, available, body, generated, subtitle=""):
     return """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -398,12 +434,12 @@ def shell(title, current, available, body, generated, subtitle=""):
 <title>%s</title><style>%s</style></head><body>
 %s
 <div class="wrap">
-<header class="page"><h1>%s</h1><div class="sub">%s</div></header>
+<header class="page"><h1>%s</h1><div class="sub">%s</div>%s</header>
 %s
 <footer>Built by <a href="https://github.com/JonathanT10/it-ops-console">it-ops-console</a>%s
 at %s (UTC) from the tools' own output. Each page is self-contained.%s</footer>
 </div></body></html>""" % (
-        esc(title), CSS, nav(current, available), esc(title), subtitle, body,
+        esc(title), CSS, nav(current, available), esc(title), subtitle, LIVE_BAR, body,
         (" (suite v%s)" % esc(SUITE_VERSION)) if SUITE_VERSION else "", esc(generated),
         ('<span class="refresh-note">%s</span>' % esc(REFRESH_NOTE)) if REFRESH_NOTE else ""
     )
