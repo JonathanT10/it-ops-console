@@ -156,8 +156,16 @@ protected your PC" for a downloaded file — click **More info → Run anyway**.
 `Setup-IT-Ops-Console.cmd` over your existing install: every tool is refreshed
 from the bundle and **your settings are kept** — `config.ini` (your printers),
 `prices.ini` (your per-seat prices), and any database sitting in a tool folder
-are set aside and put back, and setup tells you which ones it kept. Only the
+are set aside and put back, and setup tells you which ones it kept — a copy
+stays in `C:\IT-Ops\.settings-backup\` until the next update, so a failure part
+way through never leaves them somewhere you would not look. Only the
 `*.example.ini` templates ever come from the bundle.
+
+A tool folder is **renamed aside** and replaced, never deleted in place. If
+something on the machine is holding it open — a PowerShell window left over
+from a refresh, the console while it is serving, an Explorer window sitting in
+it — that tool is left exactly as it was, with a message naming what to close,
+and the rest of the install still updates.
 
 No release handy? [`Setup-IT-Ops-Console.cmd`](Setup-IT-Ops-Console.cmd) alone
 works too — it downloads what the bundle would have carried, though on an

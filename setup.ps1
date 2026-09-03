@@ -88,7 +88,7 @@ Write-Host ''
 Write-Host '=== IT Ops Console setup ==============================================' 
 Write-Host ''
 Write-Host 'This will download five small open-source tools, wire them together,'
-Write-Host 'and put three shortcuts on your desktop. Collection against your tenant'
+Write-Host 'and put two shortcuts on your desktop. Collection against your tenant'
 Write-Host 'is read-only, and you sign in yourself - nothing stores a password.'
 Write-Host ''
 Write-Host 'It asks ONE question now and two at the end. When the window pauses,'
@@ -112,8 +112,19 @@ foreach ($d in @($Root, $tools, $output, $site)) { $null = New-Item -ItemType Di
 # Best effort: a machine where this can't be set still installs, with a warning.
 if ($onWindows) {
     try {
-        $acl = New-Object System.Security.AccessControl.DirectorySecurity
+        # Start from the folder's OWN descriptor rather than a new, empty
+        # DirectorySecurity. A fresh descriptor carries an empty audit section,
+        # so Set-Acl tries to write the SACL too - and THAT needs
+        # SeSecurityPrivilege, which an ordinary un-elevated run does not have.
+        # The lock then fails with a privilege error nobody can act on, and the
+        # collected data stays readable by every local user. Modifying what
+        # Get-Acl returns writes the permissions only, and needs nothing beyond
+        # owning the folder.
+        $acl = Get-Acl -Path $Root
         $acl.SetAccessRuleProtection($true, $false)     # drop inherited ACEs
+        foreach ($rule in @($acl.Access)) {
+            if (-not $rule.IsInherited) { $null = $acl.RemoveAccessRuleSpecific($rule) }
+        }
         $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $full = [System.Security.AccessControl.FileSystemRights]::FullControl
         $inh  = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
@@ -129,7 +140,10 @@ if ($onWindows) {
         Set-Acl -Path $Root -AclObject $acl
         Write-Host "  locked $Root to you + Administrators - other local users can't read collected data"
     } catch {
-        Write-Warning "  could not lock $Root down ($($_.Exception.Message)) - it may be readable by other local users; see the README to set this by hand."
+        Write-Warning "  could not lock $Root down ($($_.Exception.Message))"
+        Write-Warning "  The data collected here - admin names, stale accounts, the app inventory -"
+        Write-Warning "  is readable by other people who use this computer until that is fixed."
+        Write-Warning "  Right-click the folder > Properties > Security, or see the README."
     }
 }
 
@@ -147,6 +161,88 @@ if ($haveBundle -and -not $bundleIsInstall) {
 } else {
     Write-Host '--- 1/6 Downloading the tools ---'
 }
+function Install-FromBundle {
+    <#
+      Replace one tool folder with the bundle's copy, keeping the settings files
+      that live in it.
+
+      The old folder is RENAMED ASIDE, never deleted in place. Anything on this
+      computer holding it open - a PowerShell window left over from a refresh,
+      the console while it is serving itself, an Explorer window sitting in it -
+      made "delete then copy" fail HALF WAY: some files already gone, the fresh
+      copy never made, and the kept settings stranded in a temp folder nobody
+      would ever find. A rename either works or it does not, and when it does
+      not, nothing has been touched at all.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Dest,
+        [Parameter(Mandatory)][string]$BackupRoot
+    )
+    $keep = @(); $stash = $null; $aside = $null
+    if (Test-Path $Dest) {
+        # Your settings survive an update: any .ini you edited (config.ini,
+        # prices.ini, sources.ini, alerts.ini) and any database in the folder.
+        # The bundle only ever ships the *.example.ini templates, so without
+        # this an update would silently replace your printer list with the
+        # example and the printers vanish.
+        $keep = @(Get-ChildItem -LiteralPath $Dest -File | Where-Object {
+            ($_.Extension -eq '.ini' -and $_.Name -notlike '*.example.ini') -or $_.Extension -eq '.db' })
+        if ($keep.Count) {
+            # Beside the install, not in %TEMP%: if anything goes wrong from
+            # here these are somewhere a person would actually look. Rebuilt
+            # each run, so it is always "your settings before this update" -
+            # never a pile of old ones, and never a file you deleted coming back.
+            $stash = Join-Path $BackupRoot $Name
+            if (Test-Path $stash) { Remove-Item -LiteralPath $stash -Recurse -Force }
+            $null = New-Item -ItemType Directory -Path $stash -Force
+            $keep | Copy-Item -Destination $stash -Force
+        }
+        $aside = "$Dest.replaced-$(Get-Date -Format yyyyMMdd-HHmmss)"
+        try {
+            Move-Item -LiteralPath $Dest -Destination $aside -ErrorAction Stop
+        } catch {
+            $where = if ($stash) { " Your settings are also copied to $stash." } else { '' }
+            throw ("Something on this computer is using $Dest, so it could not be replaced " +
+                   "- and nothing was changed. Close any PowerShell window left open by " +
+                   '"Refresh IT Ops Data", close the "IT Ops Console" window if the console ' +
+                   'is running, and close any File Explorer window showing that folder. ' +
+                   "Then run this setup again.$where")
+        }
+    }
+    try {
+        Copy-Item -LiteralPath $Source -Destination $Dest -Recurse -ErrorAction Stop
+    } catch {
+        # The fresh copy did not land. Put back exactly what was there rather
+        # than leaving the tool folder renamed aside and the install broken.
+        # Anything in $Dest at this point came from the bundle - the settings
+        # have not been put back yet - so clearing a half-copy loses nothing
+        # of yours.
+        if ($aside -and (Test-Path $aside)) {
+            if (Test-Path $Dest) { Remove-Item -LiteralPath $Dest -Recurse -Force -ErrorAction SilentlyContinue }
+            if (-not (Test-Path $Dest)) { Move-Item -LiteralPath $aside -Destination $Dest -ErrorAction SilentlyContinue }
+        }
+        $back = if ($aside -and (Test-Path $Dest)) { ' The copy you had has been put back.' } else { '' }
+        $where = if ($stash) { " Your settings are also copied to $stash." } else { '' }
+        throw "$Name could not be copied from the bundle ($($_.Exception.Message)).$back$where"
+    }
+    if ($keep.Count) {
+        Get-ChildItem -LiteralPath $stash -File | Copy-Item -Destination $Dest -Force
+        Write-Host "  installed from bundle: $Name  (kept your $($keep.Name -join ', '))"
+    } else {
+        Write-Host "  installed from bundle: $Name"
+    }
+    # From here the fresh copy is in place and correct. Clearing the old one
+    # away is tidying, not installing - if something still holds it, say so and
+    # carry on rather than failing an update that already worked.
+    if ($aside -and (Test-Path $aside)) {
+        try { Remove-Item -LiteralPath $aside -Recurse -Force -ErrorAction Stop }
+        catch { Write-Host "  (the previous copy is still in use - left at $aside; delete it whenever you like)" }
+    }
+}
+
+$notUpdated = @()
 foreach ($r in $REPOS) {
     $dest = Join-Path $tools $r
     $isConsole = ($r -eq 'it-ops-console')
@@ -168,29 +264,14 @@ foreach ($r in $REPOS) {
     }
     if ($present) { Write-Host "  refreshing: $r" } else { Write-Host "  fetching: $r" }
     if ($fromBundle) {
-        # Your settings survive an update: keep any .ini you edited (config.ini,
-        # prices.ini, sources.ini) and any database in the tool folder, then put
-        # them back once the fresh copy has landed. The bundle only ever ships
-        # the *.example.ini templates, so without this an update would silently
-        # replace your printer list with the example and the printers vanish.
-        $keep = @()
-        if (Test-Path $dest) {
-            $keep = @(Get-ChildItem -LiteralPath $dest -File | Where-Object {
-                ($_.Extension -eq '.ini' -and $_.Name -notlike '*.example.ini') -or $_.Extension -eq '.db' })
-            $stash = Join-Path ([IO.Path]::GetTempPath()) "itops-keep-$r-$([guid]::NewGuid().ToString('n').Substring(0,6))"
-            if ($keep.Count) {
-                $null = New-Item -ItemType Directory -Path $stash -Force
-                $keep | Copy-Item -Destination $stash
-            }
-            Remove-Item $dest -Recurse -Force
-        }
-        Copy-Item $bundled $dest -Recurse
-        if ($keep.Count) {
-            Get-ChildItem -LiteralPath $stash -File | Copy-Item -Destination $dest -Force
-            Remove-Item $stash -Recurse -Force
-            Write-Host "  installed from bundle: $r  (kept your $($keep.Name -join ', '))"
-        } else {
-            Write-Host "  installed from bundle: $r"
+        # One tool that cannot be replaced must not take the rest of the install
+        # down with it: say what is wrong, in words that name what to close, and
+        # carry on. Everything else still updates.
+        try {
+            Install-FromBundle -Name $r -Source $bundled -Dest $dest -BackupRoot (Join-Path $Root '.settings-backup')
+        } catch {
+            Write-Warning "  $r was NOT updated. $($_.Exception.Message)"
+            $notUpdated += $r
         }
         continue
     }
@@ -209,6 +290,12 @@ foreach ($r in $REPOS) {
             Write-Warning "  could not refresh $r - keeping the copy you have. ($($_.Exception.Message))"
         } else { throw }
     }
+}
+
+if ($notUpdated.Count) {
+    Write-Host ''
+    Write-Warning "  Not updated: $($notUpdated -join ', '). Everything else was, and your"
+    Write-Warning "  settings are safe. Close what is named above and run this setup again."
 }
 
 # --------------------------------------------------------------------------- #
@@ -333,7 +420,12 @@ if ($onWindows) {
     if ($pyExe -and (Test-Path $serve)) {
         $lnk.TargetPath = $pyExe
         $lnk.Arguments = "`"$serve`" --site `"$site`" --tool-root `"$tools`" --output-root `"$output`" --python $python --open"
-        $lnk.WorkingDirectory = $consoleDir
+        # NOT the console folder. A running program's working directory cannot be
+        # deleted or renamed on Windows, and this server runs for as long as the
+        # console is open - pointing it at the folder setup replaces would make
+        # every upgrade collide with the console itself. Nothing here needs that
+        # folder as its working directory: serve-console.py finds itself.
+        $lnk.WorkingDirectory = $Root
         $lnk.Description = 'Start the IT ops console on this computer and open it'
     } else {
         # Without Python there is no server - and no rebuilt pages either, since
@@ -349,7 +441,12 @@ if ($onWindows) {
     $lnk = $shell.CreateShortcut((Join-Path $desktop 'Refresh IT Ops Data.lnk'))
     $lnk.TargetPath = 'powershell.exe'
     $lnk.Arguments = $runArgs
-    $lnk.WorkingDirectory = $consoleDir
+    # Same reason, and this one bit for real: the shortcut runs with -NoExit, so
+    # its window stays open afterwards - with the console folder as its working
+    # directory, one left open from last week is enough to block an upgrade.
+    # run-all.ps1 is launched by full path and uses $PSScriptRoot, so it does
+    # not care where the window started.
+    $lnk.WorkingDirectory = $Root
     $lnk.Description = 'Run every collector (you sign in), then rebuild the console'
     $lnk.Save()
 

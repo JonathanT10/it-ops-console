@@ -60,6 +60,14 @@ if (Test-Path (Join-Path (Join-Path $tools 'it-ops-console') 'sources.ini')) { S
 else { Gap 'sources.ini is missing - re-run setup to rewrite it' }
 if (Test-Path (Join-Path (Join-Path $tools 'it-ops-console') 'serve-console.py')) { Say 'serve-console.py (what the console icon starts)' }
 else { Gap 'serve-console.py is missing - the console icon cannot start the console; re-run setup from a current release bundle' }
+# An update renames the old tool folder aside and deletes it afterwards. If
+# something was still holding it, that copy is left behind on purpose - better a
+# folder you can delete than an update that failed. Say what it is so nobody
+# wonders, rather than leaving it to look like damage.
+$leftovers = @(Get-ChildItem -Path $tools -Directory -Filter '*.replaced-*' -ErrorAction SilentlyContinue)
+foreach ($l in $leftovers) {
+    Note "$($l.FullName) is the copy an update replaced - it was still in use at the time, so it was left. Safe to delete."
+}
 
 # ---- can other local users read your collected data? ---- #
 # The collected data (admin names, stale accounts, app inventory) lives under
