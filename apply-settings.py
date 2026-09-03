@@ -18,8 +18,8 @@ want scanned - though its explanatory comments are kept. Each file's previous
 version is kept as <name>.bak, and nothing is written unless the result reads
 back cleanly, so a mangled paste leaves everything alone.
 
-Normally you do not run this by hand: double-click "Apply Settings" on your
-desktop and it does this with whatever you just copied.
+Normally you do not run this by hand: the console's own "Apply settings"
+button hands the block straight to this.
 """
 
 from __future__ import annotations
@@ -68,8 +68,8 @@ def main(argv=None):
         message = str(e)
         if "does not look like settings" in message:
             print("That does not look like settings from the console.")
-            print('Open the console, change what you want on the Alerts or Print fleet tab, click')
-            print('"Save settings", then double-click "Apply Settings" on your desktop.')
+            print('Open the console, change what you want on the Alerts or Print fleet tab,')
+            print('and click "Apply settings".')
         else:
             print("Nothing was changed - " + message)
         return 2

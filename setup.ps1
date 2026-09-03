@@ -13,12 +13,13 @@
          install it if it is missing
       5. Write the console's sources.ini so everything already points at
          everything else
-      6. Put three shortcuts on your desktop:
-           "IT Ops Console"        opens the console in your browser
+      6. Put two shortcuts on your desktop:
+           "IT Ops Console"        starts the console on this computer and
+                                   opens it in your browser. Its "Refresh now"
+                                   and "Apply settings" buttons then work -
+                                   there is nothing else to double-click
            "Refresh IT Ops Data"   runs every collector (you sign in), then
-                                   rebuilds the console
-           "Apply Settings"        applies what you changed on the console's
-                                   Alerts or Print fleet tab
+                                   rebuilds the console, with live progress
       7. Ask how the console should stay fresh: you click Refresh yourself,
          it refreshes daily while you are signed in, or it refreshes daily
          unattended (a Global Administrator registers a read-only app once)
@@ -320,9 +321,27 @@ if ($onWindows) {
     $shell = New-Object -ComObject WScript.Shell
     $desktop = [Environment]::GetFolderPath('Desktop')
 
+    # The console is SERVED from this computer now, by a small local server this
+    # icon starts - 127.0.0.1 only, so nothing else on the network can reach it.
+    # That is what makes "Refresh now" and "Apply settings" real buttons on the
+    # page: a page opened straight off the disk cannot write anything here, which
+    # is why applying a setting used to mean copying text and hunting an icon.
+    # Pressing this icon again opens the console you already have, not a second.
+    $serve = Join-Path $consoleDir 'serve-console.py'
+    $pyExe = if ($python) { (Get-Command $python -ErrorAction SilentlyContinue).Source } else { $null }
     $lnk = $shell.CreateShortcut((Join-Path $desktop 'IT Ops Console.lnk'))
-    $lnk.TargetPath = Join-Path $site 'index.html'
-    $lnk.Description = 'Open the IT ops console'
+    if ($pyExe -and (Test-Path $serve)) {
+        $lnk.TargetPath = $pyExe
+        $lnk.Arguments = "`"$serve`" --site `"$site`" --tool-root `"$tools`" --output-root `"$output`" --python $python --open"
+        $lnk.WorkingDirectory = $consoleDir
+        $lnk.Description = 'Start the IT ops console on this computer and open it'
+    } else {
+        # Without Python there is no server - and no rebuilt pages either, since
+        # Python is what builds them. The icon still opens whatever was built,
+        # and the page itself says why its buttons cannot do anything.
+        $lnk.TargetPath = Join-Path $site 'index.html'
+        $lnk.Description = 'Open the IT ops console'
+    }
     $lnk.Save()
 
     $runArgs = "-NoProfile -NoExit -ExecutionPolicy Bypass -File `"$consoleDir\run-all.ps1`" -ToolRoot `"$tools`" -OutputRoot `"$output`" -SitePath `"$site`""
@@ -334,25 +353,18 @@ if ($onWindows) {
     $lnk.Description = 'Run every collector (you sign in), then rebuild the console'
     $lnk.Save()
 
-    # The console's pages can only hand you your settings as text - a page
-    # cannot write into this folder. This icon is the other half: it takes
-    # what you copied and puts each part where it belongs.
-    $applyPs1 = Join-Path $consoleDir 'apply-settings.ps1'
-    if (Test-Path $applyPs1) {
-        $lnk = $shell.CreateShortcut((Join-Path $desktop 'Apply Settings.lnk'))
-        $lnk.TargetPath = 'powershell.exe'
-        $lnk.Arguments = "-NoProfile -NoExit -ExecutionPolicy Bypass -File `"$applyPs1`""
-        $lnk.WorkingDirectory = $consoleDir
-        $lnk.Description = 'Apply the settings you saved on the console''s Alerts or Print fleet tab'
-        $lnk.Save()
-        # It used to be called "Apply Alert Settings", and now does both kinds -
-        # leaving the old icon behind would point at a script that is gone.
-        $oldLnk = Join-Path $desktop 'Apply Alert Settings.lnk'
-        if (Test-Path $oldLnk) { Remove-Item $oldLnk -Force -ErrorAction SilentlyContinue }
-        Write-Host '  created: "IT Ops Console", "Refresh IT Ops Data" and "Apply Settings"'
-    } else {
-        Write-Host '  created: "IT Ops Console" and "Refresh IT Ops Data"'
+    # There used to be a third icon for applying settings, because a page opened
+    # off the disk could not do it. The console's own "Apply settings" button
+    # does it now, so the icon is removed rather than left on the desktop
+    # teaching a ritual that is no longer needed.
+    foreach ($gone in @('Apply Settings.lnk', 'Apply Alert Settings.lnk')) {
+        $old = Join-Path $desktop $gone
+        if (Test-Path $old) {
+            Remove-Item $old -Force -ErrorAction SilentlyContinue
+            Write-Host ("  removed the old '{0}' icon - the console's own Apply settings button does that now" -f [IO.Path]::GetFileNameWithoutExtension($gone))
+        }
     }
+    Write-Host '  created: "IT Ops Console" and "Refresh IT Ops Data"'
 } else {
     Write-Host '  (not Windows - skipping shortcuts)'
 }
@@ -385,7 +397,7 @@ Write-Host '=== Setup complete =================================================
 Write-Host ''
 Write-Host "  Tools:    $tools"
 Write-Host "  Data:     $output"
-Write-Host "  Console:  $(Join-Path $site 'index.html')"
+Write-Host '  Console:  double-click "IT Ops Console" on your desktop'
 Write-Host ''
 try { Stop-Transcript | Out-Null } catch { }
 

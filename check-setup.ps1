@@ -23,17 +23,28 @@ $shell = New-Object -ComObject WScript.Shell
 $console = Join-Path $desktop 'IT Ops Console.lnk'
 $refresh = Join-Path $desktop 'Refresh IT Ops Data.lnk'
 if (Test-Path $console) {
-    $target = $shell.CreateShortcut($console).TargetPath
+    $sc = $shell.CreateShortcut($console)
+    $target = $sc.TargetPath
     Say "desktop shortcut 'IT Ops Console' -> $target"
-    if ($target) { $root = Split-Path (Split-Path $target -Parent) -Parent }
+    # This icon now STARTS the console on this computer (127.0.0.1 only) and
+    # then opens it, which is what makes its "Refresh now" and "Apply settings"
+    # buttons work. An icon still pointing straight at index.html opens a page
+    # that can do neither - worth saying plainly rather than leaving someone to
+    # wonder why a button does nothing.
+    if ($sc.Arguments -match '--site\s+"([^"]+)"') {
+        $root = Split-Path $matches[1] -Parent
+        Say 'the console icon starts the console on this computer, so its buttons work'
+    } elseif ($target -like '*index.html') {
+        $root = Split-Path (Split-Path $target -Parent) -Parent
+        Gap 'the console icon opens the pages as files, so "Refresh now" and "Apply settings" cannot work - re-run setup to point it at the console service'
+    }
 } else { Gap "desktop shortcut 'IT Ops Console' is missing - re-run setup to recreate it" }
 if (Test-Path $refresh) { Say "desktop shortcut 'Refresh IT Ops Data' present" }
 else { Gap "desktop shortcut 'Refresh IT Ops Data' is missing - re-run setup to recreate it" }
-$applyLnk = Join-Path $desktop 'Apply Settings.lnk'
-if (Test-Path $applyLnk) { Say "desktop shortcut 'Apply Settings' present" }
-else { Note "desktop shortcut 'Apply Settings' is missing - re-run setup to add it (you can still edit alerts.ini and the printer config.ini by hand)" }
-if (Test-Path (Join-Path $desktop 'Apply Alert Settings.lnk')) {
-    Note "the old 'Apply Alert Settings' icon is still on your desktop - re-run setup to replace it with 'Apply Settings', which does both"
+foreach ($gone in @('Apply Settings.lnk', 'Apply Alert Settings.lnk')) {
+    if (Test-Path (Join-Path $desktop $gone)) {
+        Note ("the old '{0}' icon is still on your desktop - the console's own Apply settings button does that now; re-running setup removes it" -f [IO.Path]::GetFileNameWithoutExtension($gone))
+    }
 }
 if (-not $root) { $root = 'C:\IT-Ops'; Note "assuming the install folder is $root" }
 
@@ -47,6 +58,8 @@ foreach ($r in 'entra-tenant-docs','entra-security-snapshot','m365-license-waste
 }
 if (Test-Path (Join-Path (Join-Path $tools 'it-ops-console') 'sources.ini')) { Say 'sources.ini (the wiring file)' }
 else { Gap 'sources.ini is missing - re-run setup to rewrite it' }
+if (Test-Path (Join-Path (Join-Path $tools 'it-ops-console') 'serve-console.py')) { Say 'serve-console.py (what the console icon starts)' }
+else { Gap 'serve-console.py is missing - the console icon cannot start the console; re-run setup from a current release bundle' }
 
 # ---- can other local users read your collected data? ---- #
 # The collected data (admin names, stale accounts, app inventory) lives under
@@ -78,6 +91,19 @@ if (Test-Path $idx) {
 } else { Note 'console not built yet - double-click "Refresh IT Ops Data" to run the first collection' }
 if (Test-Path (Join-Path $output 'tenant-docs')) { Say 'tenant data has been collected at least once' }
 else { Note 'no tenant data yet - "Refresh IT Ops Data" collects it (you will sign in)' }
+# The console runs only while its window is open. Ask the thing itself rather
+# than guessing from a file that a closed window may have left behind.
+$srv = Join-Path $output 'console-server.json'
+if (Test-Path $srv) {
+    $port = $null
+    try { $port = (Get-Content $srv -Raw | ConvertFrom-Json).port } catch { }
+    if ($port) {
+        $live = $false
+        try { $null = Invoke-WebRequest "http://127.0.0.1:$port/api/ping" -TimeoutSec 2 -UseBasicParsing; $live = $true } catch { }
+        if ($live) { Say "the console is running now at http://127.0.0.1:$port/" }
+        else { Note 'the console is not running right now - double-click "IT Ops Console" to start it (it runs only while its window is open)' }
+    }
+}
 
 # ---- prerequisites ---- #
 Write-Host ''

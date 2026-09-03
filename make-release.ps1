@@ -61,14 +61,18 @@ IT Ops Suite v$Version
 Double-click Setup-IT-Ops-Console.cmd. That is the whole instruction.
 
 It installs to C:\IT-Ops (you can change that at the one question it asks),
-puts three shortcuts on your desktop, asks how the console should stay fresh,
+puts two shortcuts on your desktop, asks how the console should stay fresh,
 and offers to run the first collection:
 
-  Refresh IT Ops Data   collects from Microsoft 365 (you sign in, read-only)
+  IT Ops Console        starts the console on this computer and opens it in
+                        your browser. Everything you do is in there: a
+                        "Refresh now" button at the top, and an "Apply
+                        settings" button on the Alerts and Print fleet tabs.
+                        Leave its little window open while you use it; close
+                        it when you are done
+  Refresh IT Ops Data   the same refresh without opening the console first -
+                        collects from Microsoft 365 (you sign in, read-only)
                         and rebuilds your console, with live progress
-  IT Ops Console        opens the result in your browser
-  Apply Settings        applies changes you made on the console's Alerts
-                        or Print fleet tab
 
 Keeping it fresh - setup's last question, three answers (re-run setup to
 change it):
@@ -89,12 +93,12 @@ channel's Workflows URL (or a mail relay) in
 C:\IT-Ops\tools\it-ops-console\alerts.ini, then run  python notify.py --test
 from that folder. Messages go out only when something is new, worse or
 cleared - plus one weekly summary. After that you never need the file again:
-change what you are told about on the console's Alerts tab, click "Save
-settings", and double-click "Apply Settings" on your desktop.
+change what you are told about on the console's Alerts tab and click
+"Apply settings".
 
 Printers (optional): you do not have to type every address. On the console's
 Print fleet tab, under "Where we look", name a subnet (10.0.10.0/24), a span
-(10.0.20.50-99) or a single address, Save settings, Apply Settings - and the
+(10.0.20.50-99) or a single address, then click "Apply settings" - and the
 next Refresh finds the printers on it. That is a scan of the addresses you
 name, so point it at your own VLANs. You can still list them by hand in
 C:\IT-Ops\tools\print-fleet-dashboard\config.ini instead; either way the next

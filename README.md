@@ -82,8 +82,8 @@ listed, not silently ignored), and the last messages sent. See *Alerts* below.
 
 Typing every printer's address gets old past a floor of them. On the **Print
 fleet** tab, name a place to look instead — a subnet (`10.0.10.0/24`), a span
-(`10.0.20.50-99`) or a single address — click **Save settings**, double-click
-**Apply Settings**, and the next refresh looks there. Anything that answers as
+(`10.0.20.50-99`) or a single address — click **Apply settings**, and the next
+refresh looks there. Anything that answers as
 a printer is added, named from its `sysName`, and polled from then on; a switch
 or a server that merely speaks SNMP is passed over rather than recorded. The
 tab then shows each place with how many addresses it covers, when it was last
@@ -169,7 +169,7 @@ Prefer to see what you are running first? Download [`setup.ps1`](setup.ps1)
 itself and right-click → **Run with PowerShell**. Same result. It creates
 `C:\IT-Ops`, downloads all five tools, installs the Graph modules, checks for
 Python and offers to install it, writes a `sources.ini` where everything
-already points at everything else, and puts three shortcuts on your desktop:
+already points at everything else, and puts two shortcuts on your desktop:
 
 - **Refresh IT Ops Data** — runs every collector (you sign in when asked),
   then rebuilds the console. Double-click it on whatever rhythm suits you.
@@ -178,10 +178,10 @@ already points at everything else, and puts three shortcuts on your desktop:
   underneath, and stat chips appearing as data lands — then a plain-English
   finish with one button to open the console. (`-NoStatusPage` for
   scheduled runs.)
-- **IT Ops Console** — opens the result in your browser.
-- **Apply Settings** — applies whatever you changed on the console's Alerts tab
-  (see *Alerts*) or Print fleet tab (see *Finding printers*). Only needed when
-  you change something there.
+- **IT Ops Console** — starts the console on this computer and opens it in your
+  browser. That is where everything else is: **Refresh now** at the top of every
+  page, and **Apply settings** on the Alerts and Print fleet tabs. It leaves a
+  small window open while it serves — close it when you are done.
 
 ![Refresh progress](docs/refresh-status.png)
 
@@ -286,29 +286,29 @@ a collector failed, certificate expiring, data older than N days.
 
 **Changing the rules from the console.** The Alerts tab is the settings page:
 tick, untick, or type a new number, and the box at the bottom shows the exact
-settings your changes produce. **Save settings** copies that to the clipboard
-and drops a copy in your Downloads folder; then double-click **Apply Settings**
-on your desktop and it lands.
+settings your changes produce. Click **Apply settings** and it lands, and the
+page tells you what moved.
 
-Two steps rather than one, and deliberately so. The console is a folder of
-static HTML files — that is what lets you open it with no server running, and
-copy `console-site` onto a share for other people to read — and a page opened
-from a file cannot write into `C:\IT-Ops` by itself. The consequence worth
-knowing: **the page never contains, and never changes, where your alerts go.**
-The settings it produces cover the rules and the schedule only, so no Workflows
-URL is ever baked into a page, put on your clipboard, or left in Downloads.
-`[teams]` and `[email]` stay in `alerts.ini`, under the folder lock, edited by
-hand the once.
+That works because the **IT Ops Console** icon does not open the pages as files
+— it starts a small server on this computer and opens *that*. It listens on
+`127.0.0.1` only, so nothing else on your network can reach it, and every button
+carries a key made fresh each time it starts and sent only to the pages it
+serves itself. A page opened straight off the disk instead — by browsing to
+`console-site`, or from a copy on a share — still reads perfectly; its buttons
+say they cannot change anything rather than pretending.
 
-`Apply Settings` **merges** rather than overwrites: your comments, your
-channel settings, and any line a newer version of the console wrote are all left
-alone, and only the settings you changed move. It keeps the previous file as
+The thing worth knowing either way: **the page never contains, and never
+changes, where your alerts go.** The settings it produces cover the rules and
+the schedule only, so no Workflows URL is ever baked into a page. `[teams]` and
+`[email]` stay in `alerts.ini`, under the folder lock, edited by hand the once.
+
+Applying **merges** rather than overwrites: your comments, your channel
+settings, and any line a newer version of the console wrote are all left alone,
+and only the settings you changed move. It keeps the previous file as
 `alerts.ini.bak`, writes nothing at all if the result would not read back
 cleanly, and says what changed in plain words — "MFA coverage falls below: 90%
-to 95%. Print fleet: all alerts silenced." If your clipboard holds something
-else by the time you get there, it falls back to the copy in Downloads; if that
-is missing too, it tells you the four steps rather than failing. `python
-apply-alerts.py --dry-run` shows what it would do without doing it.
+to 95%. Print fleet: all alerts silenced." `python apply-settings.py --settings
+block.txt --dry-run` shows what it would do without doing it.
 
 **How it is built.** `console/alerts.py` is a catalog: one entry per rule (tab,
 label, on/off or threshold, default, severity, evaluate) that yields alerts with

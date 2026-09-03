@@ -88,12 +88,28 @@ var ICONS = {
 };
 var esc = function (s) { return String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
-var n = 0, lastPayload = '';
+var n = 0, lastPayload = '', missed = 0, everLoaded = false;
+/* This page is a TEMPLATE. The copy that works is the one the refresh puts in
+   your console folder, next to the progress it writes. Open the copy that
+   lives here, in the tools folder, and it polls for a progress file that is
+   not beside it - which used to mean sitting on "waiting for the first step"
+   for ever, saying nothing. Now it says what happened. */
+function sayIfNothingHere() {
+  if (everLoaded || missed < 6) { return; }
+  var log = document.getElementById('log');
+  if (!log) { return; }
+  log.innerHTML = '<b>Nothing is reporting progress to this page.</b><br><br>' +
+    'Two things do that. Either this is the spare copy of the page that lives ' +
+    'with the tools rather than the one in your console folder - open the ' +
+    'console and this page is the "Refreshing" one it takes you to - or no ' +
+    'refresh has been started yet. Open the IT Ops Console and click ' +
+    '<b>Refresh now</b>.';
+}
 function poll() {
   var el = document.createElement('script');
   el.src = 'progress.js?v=' + (n++);
   el.onload = function () { render(); el.remove(); };
-  el.onerror = function () { el.remove(); };  // mid-write or not started yet
+  el.onerror = function () { el.remove(); missed++; sayIfNothingHere(); };
   document.head.appendChild(el);
 }
 function render() {
@@ -102,6 +118,7 @@ function render() {
   var asText = JSON.stringify(P);
   if (asText === lastPayload) { return; }
   lastPayload = asText;
+  everLoaded = true;
 
   var total = P.steps.length, doneCount = 0;
   P.steps.forEach(function (s) { if (s.state !== 'pending' && s.state !== 'running') doneCount++; });

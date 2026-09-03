@@ -60,8 +60,10 @@
     fill in. Pass this to point at a prices file kept somewhere else.
 
 .PARAMETER NoStatusPage
-    Do not open the live progress page. Use for scheduled/headless runs; the
-    console itself is built either way.
+    Do not OPEN a browser window for the live progress page. The page and the
+    progress it reads are written either way - the console's own "Refresh now"
+    button already has a window, and a scheduled run that goes wrong should
+    still have left a record of where it got to.
 
 .PARAMETER NoConnect
     Skip the up-front Connect-MgGraph - use when you are already connected, or
@@ -542,24 +544,27 @@ $historyRoot = Join-Path $OutputRoot 'history'
 # Sign in once for all three Entra tools
 # --------------------------------------------------------------------------- #
 
-# Start the progress page first, so the person has something to watch while
+# Write the progress page first, so the person has something to watch while
 # the sign-in window is up - and so a failure anywhere still reports somewhere.
-if (-not $NoStatusPage) {
-    $tpl = Join-Path $PSScriptRoot 'refresh-status.html'
-    if (Test-Path $tpl) {
-        try {
-            $null = New-Item -ItemType Directory -Path $SitePath -Force
-            Copy-Item $tpl (Join-Path $SitePath 'status.html') -Force
-            $script:StatusJsPath = Join-Path $SitePath 'progress.js'
-            $script:StatusEnabled = $true
-            Update-RefreshStatus -Force
-        } catch { $script:StatusEnabled = $false }
-        # Opening the browser is best-effort and must never disable the page
-        # itself - a headless or non-Windows host still gets progress.js.
-        if ($script:StatusEnabled) {
-            try { Start-Process (Join-Path $SitePath 'status.html') | Out-Null }
-            catch { Write-Host "Progress page: $(Join-Path $SitePath 'status.html') (open it in a browser to watch)" }
-        }
+# It is written on EVERY run, -NoStatusPage or not. That switch means "do not
+# open a browser window here", which is a separate thing: the console's own
+# "Refresh now" button sends you to this page itself, and a run that writes no
+# progress leaves that page sitting on "waiting for the first step" for ever,
+# or - worse - showing the last run's "All done".
+$tpl = Join-Path $PSScriptRoot 'refresh-status.html'
+if (Test-Path $tpl) {
+    try {
+        $null = New-Item -ItemType Directory -Path $SitePath -Force
+        Copy-Item $tpl (Join-Path $SitePath 'status.html') -Force
+        $script:StatusJsPath = Join-Path $SitePath 'progress.js'
+        $script:StatusEnabled = $true
+        Update-RefreshStatus -Force
+    } catch { $script:StatusEnabled = $false }
+    # Opening the browser is best-effort and must never disable the page
+    # itself - a headless or non-Windows host still gets progress.js.
+    if ($script:StatusEnabled -and -not $NoStatusPage) {
+        try { Start-Process (Join-Path $SitePath 'status.html') | Out-Null }
+        catch { Write-Host "Progress page: $(Join-Path $SitePath 'status.html') (open it in a browser to watch)" }
     }
 }
 
