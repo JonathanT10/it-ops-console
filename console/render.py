@@ -149,6 +149,9 @@ input.wide { width: 320px; max-width: 100%; }
 /* display:flex beats the hidden attribute's own display:none, so a page
    opened as a FILE would show a Refresh button that cannot do anything. */
 .livebar[hidden] { display: none !important; }
+/* The same trap, and this one matters in the other direction: the file note
+   must vanish completely once a page really was served. */
+.banner[hidden] { display: none !important; }
 .livemsg { color: var(--muted); font-size: 13px; }
 .rows { margin: 6px 0 10px; }
 .row { display: flex; gap: 10px; align-items: center; padding: 2px 0; flex-wrap: wrap; }
@@ -400,7 +403,25 @@ def nav(current, available):
 # unless the console is being SERVED - a page opened as a file cannot start
 # anything on your computer, and a button that does nothing is worse than no
 # button. Served, window.CONSOLE_KEY exists and the bar appears.
-LIVE_BAR = """<div class="livebar" id="livebar" hidden>
+# Two things at the top of every page, and only ever one of them showing.
+#
+#   served by the console  -> a Refresh button that works
+#   opened as a FILE       -> a standing note saying exactly that
+#
+# The note is VISIBLE IN THE MARKUP and hidden by the script below only when
+# the page really was served, so it fails the safe way round. Without it a
+# file-opened page looks completely normal - the Refresh bar is simply absent,
+# and "Apply settings" reads like a button that will work - so the only
+# feedback a person gets is nothing happening. That cost someone an afternoon.
+LIVE_BAR = ('<div class="banner filenote" id="filenote" role="status">'
+    + ICONS["warn"] +
+    '<div><b>You are looking at these pages as files, so nothing on them can '
+    'change anything.</b><span class="why">Close this tab and double-click '
+    '&ldquo;IT Ops Console&rdquo; on your desktop instead. You will know you have '
+    'the real one: a small window opens and stays open, and the address starts '
+    'with 127.0.0.1 rather than file://. Only then do &ldquo;Refresh now&rdquo; '
+    'and &ldquo;Apply settings&rdquo; do anything.</span></div></div>\n'
+) + """<div class="livebar" id="livebar" hidden>
 <button type="button" class="btn" id="refresh-btn">Refresh now</button>
 <span class="livemsg" id="refresh-msg"></span></div>
 <script>
@@ -408,7 +429,10 @@ LIVE_BAR = """<div class="livebar" id="livebar" hidden>
   var bar = document.getElementById('livebar');
   var btn = document.getElementById('refresh-btn');
   var msg = document.getElementById('refresh-msg');
-  if (!bar || !window.CONSOLE_KEY) { return; }   /* opened as a file: stay hidden */
+  var note = document.getElementById('filenote');
+  /* Opened as a file: no Refresh button, and the note above stays where it is. */
+  if (!bar || !window.CONSOLE_KEY) { return; }
+  if (note) { note.hidden = true; }
   bar.hidden = false;
   function say(t) { msg.textContent = t; }
   btn.addEventListener('click', function () {
