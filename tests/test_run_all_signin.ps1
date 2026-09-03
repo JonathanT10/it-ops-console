@@ -116,7 +116,7 @@ function Get-Item {
 '@
 
 function Run-Case {
-    param([string]$Graph, [string]$CertNotAfter, [string]$IniText, [switch]$Desktop, [switch]$NoConnect, [switch]$NoKey, [int]$Timeout = 30)
+    param([string]$Graph, [string]$CertNotAfter, [string]$IniText, [switch]$Desktop, [switch]$NoConnect, [switch]$NoKey, [int]$Timeout = 30, [int]$StepTimeout = 0)
     if (Test-Path $log) { Remove-Item $log }
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     if (Test-Path $site) { Remove-Item $site -Recurse -Force }
@@ -130,6 +130,7 @@ function Run-Case {
     $flags = @()
     if (-not $Desktop) { $flags += '-Scheduled' }
     if ($NoConnect) { $flags += '-NoConnect' }
+    if ($StepTimeout) { $flags += @('-StepTimeoutMinutes', "$StepTimeout") }
     $cmd = $preamble + "`n& '$repo/run-all.ps1' -ToolRoot '$tools' -OutputRoot '$out' -SitePath '$site' -ConfigPath '$cfg' -RefreshConfig '$ini' -Python $python -NoStatusPage -SignInTimeoutSeconds $Timeout $($flags -join ' ')"
     $text = (& pwsh -NoProfile -Command $cmd 2>&1 | Out-String)
     $code = $LASTEXITCODE
@@ -215,7 +216,16 @@ Write-Host '-- 4. unattended schedule, certificate present and valid, app sign-i
 $r = Run-Case -Graph 'app-ok' -IniText $iniApp -CertNotAfter $plus700
 Check 'exit 0' ($r.Code -eq 0)
 Check 'mode app' ($r.Status.SignIn.Mode -eq 'app')
-Check 'connected as the app with tenant, client, thumbprint' ((Count $r.Log 'connect app 22222222-2222-2222-2222-222222222222 11111111-1111-1111-1111-111111111111 ABCDEF0123456789ABCDEF0123456789ABCDEF01') -eq 1)
+# Each collector runs in its own child process now, and a Graph session does
+# not cross a process boundary - so the app sign-in happens in the parent AND
+# once inside each collector. What must be true is that they are all the SAME
+# app: no child quietly falling back to asking a person instead.
+$appConnects = @($r.Log | Where-Object { $_ -like 'connect app*' })
+Check 'every app sign-in uses that tenant, client and thumbprint' (
+    $appConnects.Count -ge 1 -and
+    @($appConnects | Where-Object { $_ -ne 'connect app 22222222-2222-2222-2222-222222222222 11111111-1111-1111-1111-111111111111 ABCDEF0123456789ABCDEF0123456789ABCDEF01' }).Count -eq 0)
+Check 'each collector signed in as the app too, not as a person' (
+    $appConnects.Count -eq 4 -and (Count $r.Log 'connect user*') -eq 0)
 Check 'no user sign-in attempted' ((Count $r.Log 'connect user*') -eq 0)
 Check 'app sign-in always closed' ((Count $r.Log 'disconnect') -eq 1)
 Check 'nothing dropped' (@($r.Status.SignIn.Dropped).Count -eq 0)
@@ -292,7 +302,7 @@ Write-Host ''
 Write-Host '-- 9c. the same machine on its 07:00 schedule still uses the certificate'
 $r = Run-Case -Graph 'app-ok' -IniText $iniApp -CertNotAfter $plus700
 Check '9c mode app' ($r.Status.SignIn.Mode -eq 'app')
-Check '9c the certificate IS used when nobody is there' ((Count $r.Log 'connect app*') -eq 1)
+Check '9c the certificate IS used when nobody is there' ((Count $r.Log 'connect app*') -ge 1 -and (Count $r.Log 'connect user*') -eq 0)
 Check '9c an app sign-in is always closed' ((Count $r.Log 'disconnect') -eq 1)
 
 Write-Host ''
@@ -300,6 +310,39 @@ Write-Host '-- 9d. scheduled run, certificate present but its key cannot be open
 $r = Run-Case -Graph 'user-ok' -IniText $iniApp -CertNotAfter $plus700 -NoKey
 Check '9d the app rung is refused before it is attempted' ((Count $r.Log 'connect app*') -eq 0)
 Check '9d and the reason is a sentence, not a crypto error' (@($r.Status.SignIn.Dropped)[0] -like '*no private key*' -and @($r.Status.SignIn.Dropped)[0] -like '*Re-run setup as an administrator*')
+
+Write-Host ''
+Write-Host '-- 9e. THE HANG: a collector that blocks is stopped, and the refresh finishes'
+# This is the one the time budget inside the collector could never fix. These
+# steps block on a Microsoft sign-in window opening behind the window you are
+# watching; a process cannot interrupt itself, so the only thing that can end
+# it is the parent killing it. Here the stub sleeps far longer than the run
+# allows, which is indistinguishable from that.
+$wedge = Join-Path $tools 'entra-security-snapshot/Get-EntraSecuritySnapshot.ps1'
+$wedgeKeep = Get-Content $wedge -Raw
+Set-Content $wedge @'
+param([string]$JsonPath, [int]$StaleDays, [int]$TimeBudgetMinutes)
+Write-Host 'stub security: about to block'
+Start-Sleep -Seconds 600
+Write-Host 'never reached'
+'@
+try {
+    $t0 = Get-Date
+    $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -StepTimeout 1
+    $took = ((Get-Date) - $t0).TotalSeconds
+    Check '9e it did not sit there for ever' ($took -lt 240)
+    Check '9e the wedged step is recorded as failed' (@($r.Status.Steps | Where-Object { $_.Step -eq 'entra-security-snapshot' -and $_.Status -eq 'FAILED' }).Count -eq 1)
+    Check '9e in words a person can act on' ($r.Text -like '*took longer than 1 minutes and was stopped*' -and $r.Text -like '*sign-in window waiting behind another window*')
+    Check '9e what it managed to say before blocking is still shown' ($r.Text -like '*stub security: about to block*')
+    Check '9e the OTHER collectors still ran' (
+        @($r.Status.Steps | Where-Object { $_.Step -eq 'entra-tenant-docs' -and $_.Status -eq 'ok' }).Count -eq 1 -and
+        @($r.Status.Steps | Where-Object { $_.Step -eq 'm365-license-waste-report' -and $_.Status -eq 'ok' }).Count -eq 1)
+    Check '9e the console was still built' (
+        @($r.Status.Steps | Where-Object { $_.Step -eq 'console build' -and $_.Status -eq 'ok' }).Count -eq 1 -and $r.Index.Length -gt 0)
+    Check '9e and the run says it was not clean' ($r.Code -eq 1 -and $r.Status.Final -eq $true)
+} finally {
+    Set-Content $wedge $wedgeKeep
+}
 
 Write-Host ''
 Write-Host '-- 10. -NoConnect: the session you opened yourself'
