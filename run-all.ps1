@@ -369,6 +369,7 @@ function Invoke-Step {
     $wrapper = Join-Path $tmp "itops-step-$tag.ps1"
     $outFile = Join-Path $tmp "itops-step-$tag.out"
     $errFile = Join-Path $tmp "itops-step-$tag.err"
+    $doneFile = Join-Path $tmp "itops-step-$tag.done"
 
     $body = New-Object System.Collections.Generic.List[string]
     $body.Add('$ErrorActionPreference = ' + "'Stop'")
@@ -384,7 +385,18 @@ function Invoke-Step {
     $body.Add('$stepArgs = @{')
     foreach ($k in $Arguments.Keys) { $body.Add("    '$k' = " + (ConvertTo-PsLiteral $Arguments[$k])) }
     $body.Add('}')
-    $body.Add('& ' + (ConvertTo-PsLiteral $ScriptPath) + ' @stepArgs *>&1 | ForEach-Object { "$_" }')
+    # The wrapper records its OWN result. Reading it back from the process is
+    # not dependable: a process from Start-Process -PassThru does not populate
+    # ExitCode on Windows PowerShell until WaitForExit has cached its handle,
+    # and a null exit code is not 0 - which reported every collector as failed
+    # while they were all working perfectly. WaitForExit is called below as
+    # well; this file is what actually decides.
+    $body.Add('$rc = 0')
+    $body.Add('try {')
+    $body.Add('  & ' + (ConvertTo-PsLiteral $ScriptPath) + ' @stepArgs *>&1 | ForEach-Object { "$_" }')
+    $body.Add('} catch { $rc = 1; "ERROR: " + $_.Exception.Message }')
+    $body.Add('Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $doneFile) + ' -Value $rc -Encoding ASCII')
+    $body.Add('exit $rc')
     Set-Content -Path $wrapper -Value ($body -join [Environment]::NewLine) -Encoding UTF8
 
     $engine = $null
@@ -428,6 +440,7 @@ function Invoke-Step {
             Start-Sleep -Milliseconds 300
         }
         if ($carry.Trim()) { Write-Host $carry.Trim(); Add-StatusLine $StepKey $carry.Trim() }
+        if (-not $timedOut) { try { $proc.WaitForExit() } catch { } }
         $sw.Stop()
 
         if ($timedOut) {
@@ -438,11 +451,21 @@ function Invoke-Step {
             Write-Warning $plain
             return
         }
-        if ($proc.ExitCode -ne 0) {
+        # What the wrapper wrote is the answer; the process's own exit code is
+        # only consulted when the wrapper never got to write one at all.
+        $rc = $null
+        if (Test-Path -LiteralPath $doneFile) {
+            try { $rc = [int]((Get-Content -LiteralPath $doneFile -Raw).Trim()) } catch { $rc = $null }
+        }
+        if ($null -eq $rc) {
+            try { $rc = $proc.ExitCode } catch { $rc = $null }
+            if ($null -eq $rc) { $rc = 1 }   # it did not finish cleanly enough to say
+        }
+        if ($rc -ne 0) {
             $why = ''
             try { $why = (Get-Content -LiteralPath $errFile -Raw -ErrorAction Stop) } catch { }
             $why = @("$why" -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1) -join ''
-            if (-not $why) { $why = "exit code $($proc.ExitCode)" }
+            if (-not $why) { $why = "it stopped without saying why (result $rc)" }
             Add-Result $Name 'FAILED' $why $sw.Elapsed.TotalSeconds
             Add-StatusLine $StepKey "ERROR: $why"
             Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name $why)
@@ -459,7 +482,7 @@ function Invoke-Step {
         Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name $_.Exception.Message)
         Write-Warning "$Name failed: $($_.Exception.Message)"
     } finally {
-        Remove-Item $wrapper, $outFile, $errFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $wrapper, $outFile, $errFile, $doneFile -Force -ErrorAction SilentlyContinue
     }
 }
 
