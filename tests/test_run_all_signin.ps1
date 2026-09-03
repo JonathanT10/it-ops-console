@@ -345,6 +345,45 @@ try {
 }
 
 Write-Host ''
+Write-Host '-- 9f. a collector that WORKED is never reported as failed'
+# Shipped broken once: the child's result was read from Process.ExitCode, which
+# on Windows PowerShell stays null until WaitForExit has cached the handle - and
+# null is not 0, so every collector came back FAILED with the detail "exit code "
+# while all three had in fact written their output perfectly. Two claims here:
+# a step that succeeded says so, and no failure detail is ever blank.
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop
+$okSteps = @($r.Status.Steps | Where-Object { $_.Status -eq 'ok' } | ForEach-Object { $_.Step })
+Check '9f every collector that ran is reported ok' (
+    'entra-tenant-docs' -in $okSteps -and 'entra-security-snapshot' -in $okSteps -and
+    'm365-license-waste-report' -in $okSteps)
+Check '9f none of them is reported failed' (
+    @($r.Status.Steps | Where-Object { $_.Status -eq 'FAILED' }).Count -eq 0)
+Check '9f and the run reads as clean' ($r.Code -eq 0 -and $r.Status.Ok -eq $true)
+Check '9f nothing says "exit code" with nothing after it' ($r.Text -notmatch 'exit code\s*$' -and $r.Text -notlike '*ERROR: exit code *')
+
+Write-Host ''
+Write-Host '-- 9g. a collector that FAILS says why, and never says it blankly'
+$boom = Join-Path $tools 'm365-license-waste-report/Get-LicenseWasteReport.ps1'
+$boomKeep = Get-Content $boom -Raw
+Set-Content $boom @'
+param([string]$JsonPath, [int]$StaleDays, [string]$PriceList)
+Write-Host 'stub license: about to fail'
+throw 'the licence report could not read the tenant'
+'@
+try {
+    $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop
+    $lic = @($r.Status.Steps | Where-Object { $_.Step -eq 'm365-license-waste-report' })[0]
+    Check '9g the failing step is reported failed' ($lic.Status -eq 'FAILED')
+    Check '9g with a reason, not a blank one' ($lic.Detail -and $lic.Detail.Trim().Length -gt 0)
+    Check '9g the reason is the collector''s own words' ($r.Text -like '*could not read the tenant*')
+    Check '9g the OTHER collectors are still ok' (
+        @($r.Status.Steps | Where-Object { $_.Step -eq 'entra-tenant-docs' -and $_.Status -eq 'ok' }).Count -eq 1)
+    Check '9g the console was still built' ($r.Index.Length -gt 0)
+} finally {
+    Set-Content $boom $boomKeep
+}
+
+Write-Host ''
 Write-Host '-- 10. -NoConnect: the session you opened yourself'
 $r = Run-Case -Graph 'user-ok' -NoConnect
 Check 'exit 0' ($r.Code -eq 0)
