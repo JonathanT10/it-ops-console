@@ -124,6 +124,11 @@ param(
     # throttled thing this whole refresh does, and an unbounded one is
     # indistinguishable from a hang. 0 removes the limit.
     [ValidateRange(0, 240)][int]$SecurityBudgetMinutes = 20,
+    # A collector that runs past this is STOPPED, and the refresh carries on
+    # without it. Nothing else can guarantee that: a step blocks on a sign-in
+    # window nobody can see, and a process cannot interrupt itself. 0 removes
+    # the limit, which is the old behaviour and can hang for ever.
+    [ValidateRange(0, 240)][int]$StepTimeoutMinutes = 30,
     [string]$RefreshConfig,
     [ValidateRange(30, 3600)][int]$SignInTimeoutSeconds = 300,
     [string]$AlertsConfig,
@@ -279,16 +284,68 @@ function Update-StatsFromOutputs {
     Update-RefreshStatus -Force
 }
 
+function ConvertTo-PsLiteral {
+    <# One argument value as PowerShell source, for the wrapper script below. #>
+    param($Value)
+    if ($null -eq $Value) { return '$null' }
+    if ($Value -is [bool])   { return $(if ($Value) { '$true' } else { '$false' }) }
+    if ($Value -is [switch]) { return $(if ($Value.IsPresent) { '$true' } else { '$false' }) }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [double]) { return "$Value" }
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Read-NewText {
+    <# The bytes added to a file since $Offset. The child is still writing to
+       it, so it is opened shared - a plain Get-Content would fight for it. #>
+    param([string]$Path, [ref]$Offset)
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    try {
+        $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    } catch { return '' }
+    try {
+        if ($fs.Length -le $Offset.Value) { return '' }
+        $null = $fs.Seek($Offset.Value, [IO.SeekOrigin]::Begin)
+        $buf = New-Object byte[] ($fs.Length - $Offset.Value)
+        $read = $fs.Read($buf, 0, $buf.Length)
+        $Offset.Value += $read
+        return [Text.Encoding]::UTF8.GetString($buf, 0, $read)
+    } finally { $fs.Dispose() }
+}
+
+function Stop-ProcessTree {
+    param($Process)
+    if (-not $Process -or $Process.HasExited) { return }
+    if ($env:OS -eq 'Windows_NT') {
+        # /T takes the children with it - a collector may have started its own.
+        try { & taskkill.exe /PID $Process.Id /T /F 2>&1 | Out-Null } catch { }
+    }
+    try { if (-not $Process.HasExited) { $Process.Kill() } } catch { }
+}
+
 function Invoke-Step {
     <# Runs one collector, times it, and turns a failure into a recorded result
-       rather than an aborted run. #>
+       rather than an aborted run.
+
+       The collector runs in a CHILD PowerShell, not in this one. That is the
+       whole point: a step that blocks - and the way these block is a Microsoft
+       sign-in window opening behind the window you are watching, which nobody
+       ever sees or finishes - cannot be interrupted from inside the process it
+       is blocking. A child can be killed. So it gets a deadline, and if it
+       runs past it the process tree is stopped and the step is reported as
+       "took longer than N minutes" instead of the refresh sitting there for
+       ever. The child is started -NonInteractive too, so a prompt fails rather
+       than waits; the deadline is what makes that a guarantee.
+
+       Output is streamed out of the child's redirect files as it appears, so
+       the progress page still shows each stage AS IT HAPPENS. #>
     param(
         [string]$Name,
         [string]$ScriptPath,
         [hashtable]$Arguments,
         [switch]$Skip,
         [string]$SkipReason,
-        [string]$StepKey
+        [string]$StepKey,
+        [int]$TimeoutMinutes = 0
     )
     if ($Skip) {
         Add-Result $Name 'skipped' $SkipReason
@@ -306,27 +363,103 @@ function Invoke-Step {
     Write-Host "--- $Name ".PadRight(72, '-')
     Set-StepState $StepKey 'running'
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    $tag = [guid]::NewGuid().ToString('n').Substring(0, 8)
+    $tmp = [IO.Path]::GetTempPath()
+    $wrapper = Join-Path $tmp "itops-step-$tag.ps1"
+    $outFile = Join-Path $tmp "itops-step-$tag.out"
+    $errFile = Join-Path $tmp "itops-step-$tag.err"
+
+    $body = New-Object System.Collections.Generic.List[string]
+    $body.Add('$ErrorActionPreference = ' + "'Stop'")
+    $body.Add('$ProgressPreference = ' + "'SilentlyContinue'")
+    if ($script:ChildConnect) {
+        # Only the app route needs saying: it is app-only, and a collector left
+        # to itself would ask for delegated scopes instead. On the person route
+        # each collector signs in from this account's saved sign-in, which is
+        # already on disk - no window, and nothing here to get wrong.
+        $body.Add('Import-Module Microsoft.Graph.Authentication -ErrorAction Stop')
+        $body.Add($script:ChildConnect)
+    }
+    $body.Add('$stepArgs = @{')
+    foreach ($k in $Arguments.Keys) { $body.Add("    '$k' = " + (ConvertTo-PsLiteral $Arguments[$k])) }
+    $body.Add('}')
+    $body.Add('& ' + (ConvertTo-PsLiteral $ScriptPath) + ' @stepArgs *>&1 | ForEach-Object { "$_" }')
+    Set-Content -Path $wrapper -Value ($body -join [Environment]::NewLine) -Encoding UTF8
+
+    $engine = $null
+    try { $engine = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { }
+    if (-not $engine) { $engine = if ($env:OS -eq 'Windows_NT') { 'powershell.exe' } else { 'pwsh' } }
+    $psArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $wrapper)
+
+    $script:StepOutAt = 0
+    $script:StepErrAt = 0
+    $carry = ''
+    $proc = $null
+    $timedOut = $false
+    $deadline = if ($TimeoutMinutes -gt 0) { (Get-Date).AddMinutes($TimeoutMinutes) } else { $null }
+
     try {
-        # *>&1 turns the collector's Write-Host stage lines into a stream this
-        # pipeline can see, so the progress page shows them AS THEY HAPPEN.
-        # Data objects (a report's return value) are dropped, not displayed.
-        & $ScriptPath @Arguments *>&1 | ForEach-Object {
-            if ($_ -is [System.Management.Automation.InformationRecord] -or
-                $_ -is [System.Management.Automation.WarningRecord] -or
-                $_ -is [string]) {
-                $line = "$_".TrimEnd()
-                if ($line) { Write-Host $line; Add-StatusLine $StepKey $line }
+        # -WindowStyle exists only on Windows PowerShell; asking for it
+        # anywhere else is an error, not a no-op.
+        $start = @{ FilePath = $engine; ArgumentList = $psArgs; PassThru = $true
+                    RedirectStandardOutput = $outFile; RedirectStandardError = $errFile }
+        if ($env:OS -eq 'Windows_NT') { $start['WindowStyle'] = 'Hidden' }
+        $proc = Start-Process @start
+        while ($true) {
+            $done = $proc.HasExited
+            $text = (Read-NewText $outFile ([ref]$script:StepOutAt)) + (Read-NewText $errFile ([ref]$script:StepErrAt))
+            if ($text) {
+                $text = $carry + $text
+                $parts = $text -split "`r?`n"
+                $carry = $parts[-1]
+                for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+                    $line = "$($parts[$i])".TrimEnd()
+                    if ($line) { Write-Host $line; Add-StatusLine $StepKey $line }
+                }
             }
+            if ($done) { break }
+            if ($deadline -and (Get-Date) -gt $deadline) {
+                $timedOut = $true
+                Stop-ProcessTree $proc
+                Start-Sleep -Milliseconds 500
+                break
+            }
+            Start-Sleep -Milliseconds 300
         }
+        if ($carry.Trim()) { Write-Host $carry.Trim(); Add-StatusLine $StepKey $carry.Trim() }
         $sw.Stop()
+
+        if ($timedOut) {
+            $plain = "$Name took longer than $TimeoutMinutes minutes and was stopped, so this refresh has no fresh data from it. The usual cause is a Microsoft sign-in window waiting behind another window. Double-click ""Refresh IT Ops Data"" to try again."
+            Add-Result $Name 'FAILED' "stopped after $TimeoutMinutes minutes" $sw.Elapsed.TotalSeconds
+            Add-StatusLine $StepKey "Stopped after $TimeoutMinutes minutes."
+            Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain $plain
+            Write-Warning $plain
+            return
+        }
+        if ($proc.ExitCode -ne 0) {
+            $why = ''
+            try { $why = (Get-Content -LiteralPath $errFile -Raw -ErrorAction Stop) } catch { }
+            $why = @("$why" -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1) -join ''
+            if (-not $why) { $why = "exit code $($proc.ExitCode)" }
+            Add-Result $Name 'FAILED' $why $sw.Elapsed.TotalSeconds
+            Add-StatusLine $StepKey "ERROR: $why"
+            Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name $why)
+            Write-Warning "$Name failed: $why"
+            return
+        }
         Add-Result $Name 'ok' '' $sw.Elapsed.TotalSeconds
         Set-StepState $StepKey 'ok' -Seconds $sw.Elapsed.TotalSeconds
     } catch {
         $sw.Stop()
+        Stop-ProcessTree $proc
         Add-Result $Name 'FAILED' $_.Exception.Message $sw.Elapsed.TotalSeconds
         Add-StatusLine $StepKey "ERROR: $($_.Exception.Message)"
         Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name $_.Exception.Message)
         Write-Warning "$Name failed: $($_.Exception.Message)"
+    } finally {
+        Remove-Item $wrapper, $outFile, $errFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -736,6 +869,17 @@ if ($signedIn -and $script:SignIn.Mode -ne 'existing') {
 
 $notSignedIn = if ($signedIn) { $null } else { 'not signed in' }
 
+# Each collector now runs in its own child process, and a Graph session does
+# not cross a process boundary. On the person route that is fine: the child
+# signs in from this account's saved sign-in, already on disk, without a
+# window. The APP route has to be spelled out, because a collector left to
+# itself would ask for delegated scopes instead of using the certificate.
+$script:ChildConnect = ''
+if ($script:SignIn.Mode -eq 'app' -and $certInfo.Configured) {
+    $script:ChildConnect = ("Connect-MgGraph -ClientId '{0}' -TenantId '{1}' -CertificateThumbprint '{2}' -NoWelcome -ErrorAction Stop" -f
+                            $certInfo.ClientId, $certInfo.TenantId, $certInfo.Thumbprint)
+}
+
 function Write-RefreshStatus {
     <# One small JSON the console (and check-setup) read: how the last refresh
        signed in, what was passed over, the schedule this machine is on, and
@@ -776,7 +920,8 @@ $null = New-Item -ItemType Directory -Path $OutputRoot -Force
 Invoke-Step -Name 'entra-tenant-docs' -Skip:($SkipTenantDocs -or -not $signedIn) -StepKey 'tenant' `
     -SkipReason $(if ($SkipTenantDocs) { '' } else { $notSignedIn }) `
     -ScriptPath (Join-Path $ToolRoot 'entra-tenant-docs\Export-EntraTenantDocs.ps1') `
-    -Arguments @{ OutputPath = (Join-Path $OutputRoot 'tenant-docs') }
+    -Arguments @{ OutputPath = (Join-Path $OutputRoot 'tenant-docs') } `
+    -TimeoutMinutes $StepTimeoutMinutes
 Update-StatsFromOutputs
 
 Invoke-Step -Name 'entra-security-snapshot' -Skip:($SkipSecurity -or -not $signedIn) -StepKey 'security' `
@@ -786,7 +931,8 @@ Invoke-Step -Name 'entra-security-snapshot' -Skip:($SkipSecurity -or -not $signe
         JsonPath          = (Join-Path $OutputRoot 'security-snapshot.json')
         StaleDays         = $StaleDays
         TimeBudgetMinutes = $SecurityBudgetMinutes
-    }
+    } `
+    -TimeoutMinutes $StepTimeoutMinutes
 Update-StatsFromOutputs
 Save-HistorySnapshot -Step 'entra-security-snapshot' -Prefix 'security' `
     -Source (Join-Path $OutputRoot 'security-snapshot.json') -HistoryDir (Join-Path $historyRoot 'security')
@@ -806,7 +952,8 @@ if (Test-Path $pricesPath) { $licenseArgs['PriceList'] = $pricesPath }
 Invoke-Step -Name 'm365-license-waste-report' -Skip:($SkipLicensing -or -not $signedIn) -StepKey 'licensing' `
     -SkipReason $(if ($SkipLicensing) { '' } else { $notSignedIn }) `
     -ScriptPath (Join-Path $licenseRepo 'Get-LicenseWasteReport.ps1') `
-    -Arguments $licenseArgs
+    -Arguments $licenseArgs `
+    -TimeoutMinutes $StepTimeoutMinutes
 Update-StatsFromOutputs
 Save-HistorySnapshot -Step 'm365-license-waste-report' -Prefix 'licensing' `
     -Source (Join-Path $OutputRoot 'licensing.json') -HistoryDir (Join-Path $historyRoot 'licensing')
