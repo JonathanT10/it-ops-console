@@ -316,12 +316,17 @@ Check '9d the app rung is refused before it is attempted' ((Count $r.Log 'connec
 Check '9d and the reason is a sentence, not a crypto error' (@($r.Status.SignIn.Dropped)[0] -like '*no private key*' -and @($r.Status.SignIn.Dropped)[0] -like '*Re-run setup as an administrator*')
 
 Write-Host ''
-Write-Host '-- 9e. THE HANG: a collector that blocks is stopped, and the refresh finishes'
-# This is the one the time budget inside the collector could never fix. These
-# steps block on a Microsoft sign-in window opening behind the window you are
-# watching; a process cannot interrupt itself, so the only thing that can end
-# it is the parent killing it. Here the stub sleeps far longer than the run
-# allows, which is indistinguishable from that.
+Write-Host '-- 9e. THE HANG: on the SCHEDULED app route a blocked collector is stopped'
+# The per-step deadline belongs to the route that still runs collectors in a
+# child process: the unattended schedule. Nobody is watching a 7 AM run, so a
+# step that blocks has to be killed from outside, and only a child can be.
+#
+# This case used to be a DESKTOP click, because every route used a child then.
+# The person route no longer does - a child had to sign in a second time, and
+# that second sign-in is what blocked in the first place. What guards a person
+# route instead: the console's own server stops a run that overruns (see
+# tests/test_serve.py), the scheduled task carries a 2-hour execution limit,
+# and a person double-clicking the icon is sitting in front of it.
 $wedge = Join-Path $tools 'entra-security-snapshot/Get-EntraSecuritySnapshot.ps1'
 $wedgeKeep = Get-Content $wedge -Raw
 Set-Content $wedge @'
@@ -332,7 +337,7 @@ Write-Host 'never reached'
 '@
 try {
     $t0 = Get-Date
-    $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -StepTimeout 1
+    $r = Run-Case -Graph 'app-ok' -IniText $iniApp -CertNotAfter $plus700 -StepTimeout 1
     $took = ((Get-Date) - $t0).TotalSeconds
     Check '9e it did not sit there for ever' ($took -lt 240)
     Check '9e the wedged step is recorded as failed' (@($r.Status.Steps | Where-Object { $_.Step -eq 'entra-security-snapshot' -and $_.Status -eq 'FAILED' }).Count -eq 1)
@@ -409,6 +414,123 @@ try {
     Check '9g the log ends with the outcome' ($logText -like '*step(s) had problems*')
 } finally {
     Set-Content $boom $boomKeep
+}
+
+Write-Host ''
+Write-Host '-- 9h. ONE SIGN-IN PER RUN: the person route runs collectors in this process'
+# The failure this closes: a Graph session does not cross a process boundary,
+# so a collector in a child process signed in AGAIN - and Connect-MgGraph gets
+# no token by itself, the first Graph call does. When that could not be
+# answered from what the account already held, the SDK fell back to a browser
+# window inside a hidden -NonInteractive child, where nobody could ever answer
+# it. Two minutes later the step reported "User canceled authentication".
+#
+# These stubs do exactly what the real collectors do - connect only if there is
+# no context yet - and write down the process they ran in. Same process three
+# times, and no second sign-in, is the whole fix.
+$whoLog = Join-Path $work 'who.log'
+# Appended to the ORDINARY stubs, so every feed is still written and the rest
+# of the run behaves exactly as it does in every other case here.
+$stubBody = @'
+Write-Host 'STUB @@N@@ running'
+Import-Module Microsoft.Graph.Authentication -ErrorAction SilentlyContinue
+if (Get-MgContext) { $ctx = 'has-context' } else { $ctx = 'no-context'; Connect-MgGraph -Scopes 'User.Read.All' -NoWelcome }
+Add-Content $env:ITOPS_WHO_LOG "@@N@@|$PID|$ctx"
+'@
+$stubs = @(
+    @{ Path = 'entra-tenant-docs/Export-EntraTenantDocs.ps1';          Name = 'tenant' }
+    @{ Path = 'entra-security-snapshot/Get-EntraSecuritySnapshot.ps1'; Name = 'security' }
+    @{ Path = 'm365-license-waste-report/Get-LicenseWasteReport.ps1';  Name = 'licensing' }
+)
+$keep = @{}
+foreach ($st in $stubs) {
+    $full = Join-Path $tools $st.Path
+    $keep[$st.Path] = Get-Content $full -Raw
+    Set-Content $full ($keep[$st.Path].TrimEnd() + "`n" + $stubBody.Replace('@@N@@', $st.Name))
+}
+$env:ITOPS_WHO_LOG = $whoLog
+try {
+    if (Test-Path $whoLog) { Remove-Item $whoLog }
+    $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop
+    $who = @(if (Test-Path $whoLog) { Get-Content $whoLog })
+    $pids = @($who | ForEach-Object { ($_ -split '\|')[1] } | Sort-Object -Unique)
+    Check '9h all three collectors ran' ($who.Count -eq 3)
+    Check '9h every one of them ran in the SAME process' ($pids.Count -eq 1)
+    Check '9h and every one already had the sign-in' (
+        @($who | Where-Object { $_ -like '*|has-context' }).Count -eq 3)
+    Check '9h so nobody signed in a second time' ((Count $r.Log 'connect user*') -eq 1)
+    Check '9h the run is clean' ($r.Code -eq 0 -and $r.Status.Ok -eq $true)
+    Check '9h their output still reaches the transcript as it happens' (
+        $r.Text -like '*STUB tenant running*' -and $r.Text -like '*STUB security running*' -and
+        $r.Text -like '*STUB licensing running*')
+
+    Write-Host ''
+    Write-Host '-- 9i. the SCHEDULED app route still gives each collector its own process'
+    # The deadline only means anything if there is still something to kill.
+    if (Test-Path $whoLog) { Remove-Item $whoLog }
+    $r = Run-Case -Graph 'app-ok' -IniText $iniApp -CertNotAfter $plus700
+    $who = @(if (Test-Path $whoLog) { Get-Content $whoLog })
+    $pids = @($who | ForEach-Object { ($_ -split '\|')[1] } | Sort-Object -Unique)
+    Check '9i all three collectors ran' ($who.Count -eq 3)
+    Check '9i each in a process of its OWN' ($pids.Count -eq 3)
+    Check '9i each handed the certificate, not left to ask a person' (
+        (Count $r.Log 'connect app*') -eq 4 -and (Count $r.Log 'connect user*') -eq 0)
+    Check '9i and none of them had to connect for itself' (
+        @($who | Where-Object { $_ -like '*|has-context' }).Count -eq 3)
+} finally {
+    foreach ($st in $stubs) { Set-Content (Join-Path $tools $st.Path) $keep[$st.Path] }
+    $env:ITOPS_WHO_LOG = $null
+}
+
+Write-Host ''
+Write-Host '-- 9j. a collector that gives up WITHOUT throwing is no longer reported ok'
+# The wrapper used to set its own result to 0 unless the collector threw, so a
+# collector that decided for itself to stop - `exit 3` - was written down as a
+# success and its stale output was read as if it were new.
+$quit = Join-Path $tools 'entra-security-snapshot/Get-EntraSecuritySnapshot.ps1'
+$quitKeep = Get-Content $quit -Raw
+Set-Content $quit @'
+param([string]$JsonPath, [int]$StaleDays, [int]$TimeBudgetMinutes)
+Write-Host 'stub security: giving up quietly'
+exit 3
+'@
+try {
+    $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop
+    $sec = @($r.Status.Steps | Where-Object { $_.Step -eq 'entra-security-snapshot' })[0]
+    Check '9j it is reported FAILED, not ok' ($sec.Status -eq 'FAILED')
+    Check '9j and the result it gave up with is written down' ($sec.Detail -like '*result 3*')
+    Check '9j what it said before quitting is still shown' ($r.Text -like '*giving up quietly*')
+    Check '9j the run says it was not clean' ($r.Code -eq 1)
+    Check '9j the OTHER collectors are untouched' (
+        @($r.Status.Steps | Where-Object { $_.Step -eq 'entra-tenant-docs' -and $_.Status -eq 'ok' }).Count -eq 1)
+} finally {
+    Set-Content $quit $quitKeep
+}
+
+Write-Host ''
+Write-Host '-- 9k. the sign-in sentence sends a person somewhere that helps'
+# It used to say "The sign-in window was closed before finishing. Run this
+# again." Nobody had closed a window - there was no window - and running it
+# again did the same thing. This is the sentence that made the fix look like
+# no fix at all, so it is asserted, not assumed.
+$boom2 = Join-Path $tools 'm365-license-waste-report/Get-LicenseWasteReport.ps1'
+$boom2Keep = Get-Content $boom2 -Raw
+Set-Content $boom2 @'
+param([string]$JsonPath, [int]$StaleDays, [string]$PriceList)
+throw 'InteractiveBrowserCredential authentication failed: User canceled authentication.'
+'@
+try {
+    $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop
+    $lic = @($r.Status.Steps | Where-Object { $_.Step -eq 'm365-license-waste-report' })[0]
+    Check '9k the raw reason is still recorded for searching' ($lic.Detail -like '*InteractiveBrowserCredential*')
+    Check '9k the old untrue sentence is gone everywhere' (
+        $r.Text -notlike '*sign-in window was closed before finishing*' -and
+        "$($r.Status.Message)" -notlike '*sign-in window was closed before finishing*')
+    Check '9k it says what actually happened' ($r.Status.Message -like '*wanted a fresh sign-in part-way through*')
+    Check '9k it names the thing to do next' ($r.Status.Message -like '*finish the Microsoft sign-in when it appears*')
+    Check '9k and what it means if that does not help' ($r.Status.Message -like '*has not been approved yet*')
+} finally {
+    Set-Content $boom2 $boom2Keep
 }
 
 Write-Host ''

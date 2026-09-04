@@ -259,6 +259,104 @@ def main():
         import shutil as sh
         sh.rmtree(tmp, ignore_errors=True)
 
+    # ---- a refresh that never finishes is stopped, and the page says so ---- #
+    # The per-step deadline used to be the guarantee, but it belonged to child
+    # processes, and on the person route there are none any more - a collector
+    # in a child had to sign in a second time, which is the failure this whole
+    # change removes. So the guarantee lives here now: the server that started
+    # the refresh is the thing still watching it.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "itops_serve_console", os.path.join(ROOT, "serve-console.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    shell = mod.find_powershell()
+    check("deadline: there is a PowerShell to test the deadline with", bool(shell))
+    if shell:
+        d = tempfile.mkdtemp(prefix="itops-deadline-")
+        cdir = os.path.join(d, "tools", "it-ops-console")
+        sdir = os.path.join(d, "console-site")
+        os.makedirs(cdir)
+        os.makedirs(sdir)
+        with open(os.path.join(cdir, "run-all.ps1"), "w", encoding="utf-8") as fh:
+            fh.write("param($ToolRoot,$OutputRoot,$SitePath,$Python,[switch]$NoStatusPage)\n"
+                     "Start-Sleep -Seconds 300\n")
+        runner = mod.Runner(cdir, sdir, os.path.join(d, "tools"),
+                            os.path.join(d, "output"), sys.executable, shell)
+        runner.deadline_seconds = 4
+        started, _ = runner.start_refresh()
+        check("deadline: the refresh started", started)
+        stuck = runner.proc
+        # what a real run leaves lying there mid-flight, written after the
+        # start because starting a refresh clears the last run's progress
+        time.sleep(1)
+        with open(os.path.join(sdir, "progress.js"), "w", encoding="utf-8") as fh:
+            fh.write("window.PROGRESS = " + json.dumps({
+                "done": False, "ok": True, "summary": [],
+                "steps": [
+                    {"key": "signin", "label": "Signing you in", "detail": "read-only",
+                     "state": "ok", "seconds": 1.2, "now": None},
+                    {"key": "security", "label": "Checking security posture",
+                     "detail": "MFA coverage, admin accounts", "state": "running",
+                     "seconds": None, "now": None}],
+                "stats": [], "log": ["Collecting users (this can take a while)..."]}) + ";")
+        limit = time.time() + 60
+        while time.time() < limit and stuck.poll() is None:
+            time.sleep(0.5)
+        check("deadline: a refresh that overruns is stopped", stuck.poll() is not None)
+        with open(os.path.join(sdir, "progress.js"), encoding="utf-8") as fh:
+            raw = fh.read()
+        payload = {}
+        try:
+            payload = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
+        except ValueError:
+            pass
+        words = " ".join(payload.get("summary") or [])
+        check("deadline: the live page is told the run is over, not left spinning",
+              payload.get("done") is True)
+        check("deadline: and that it did not go well", payload.get("ok") is False)
+        check("deadline: it says the refresh was stopped, and roughly when",
+              "stopped after" in words and "had not finished" in words)
+        check("deadline: and points at the usual cause",
+              "sign-in window waiting behind another window" in words)
+        onstep = [x for x in (payload.get("steps") or []) if x.get("key") == "security"]
+        check("deadline: the step it was on is marked failed, not left running",
+              bool(onstep) and onstep[0].get("state") == "failed")
+        check("deadline: a step that had already finished is left alone",
+              any(x.get("key") == "signin" and x.get("state") == "ok"
+                  for x in (payload.get("steps") or [])))
+        check("deadline: what the run had already said is kept",
+              "Collecting users (this can take a while)..." in (payload.get("log") or []))
+
+        # ...and a refresh that finishes in time is never touched
+        with open(os.path.join(cdir, "run-all.ps1"), "w", encoding="utf-8") as fh:
+            fh.write("param($ToolRoot,$OutputRoot,$SitePath,$Python,[switch]$NoStatusPage)\n"
+                     "Start-Sleep -Seconds 1\n")
+        runner.deadline_seconds = 30
+        runner.start_refresh()
+        quick = runner.proc
+        limit = time.time() + 60
+        while time.time() < limit and quick.poll() is None:
+            time.sleep(0.5)
+        time.sleep(1)
+        with open(os.path.join(sdir, "progress.js"), "w", encoding="utf-8") as fh:
+            fh.write("window.PROGRESS = " + json.dumps({"done": True, "ok": True,
+                                                        "summary": ["All done."]}) + ";")
+        time.sleep(8)
+        with open(os.path.join(sdir, "progress.js"), encoding="utf-8") as fh:
+            after = fh.read()
+        check("deadline: a run that finished in time is never marked stopped",
+              "All done." in after and "stopped after" not in after)
+
+        # a progress file that is not there at all must not stop it saying so
+        os.remove(os.path.join(sdir, "progress.js"))
+        runner.mark_stopped("test words")
+        with open(os.path.join(sdir, "progress.js"), encoding="utf-8") as fh:
+            bare = fh.read()
+        check("deadline: it can say so even with no progress file to build on",
+              "test words" in bare and '"done": true' in bare)
+        sh.rmtree(d, ignore_errors=True)
+
     print("")
     if FAILS:
         print("RESULT: %d FAILURES" % len(FAILS))
