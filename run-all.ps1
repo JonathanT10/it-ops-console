@@ -183,7 +183,59 @@ function Get-PlainWords {
         '*TooManyRequests*'              { return 'Microsoft asked us to slow down. Wait a few minutes and run this again.' }
         '*429*'                          { return 'Microsoft asked us to slow down. Wait a few minutes and run this again.' }
     }
-    return $null
+    # No pattern matched. The RAW detail is still the best thing anyone has -
+    # returning $null here meant the caller's `if ($words)` was false, so the
+    # summary listed nothing after "N step(s) had problems:" and the progress
+    # page kept showing the step's ordinary description under a red icon.
+    # A reason we cannot translate is still a reason.
+    return $Detail
+}
+
+# --------------------------------------------------------------------------- #
+# A record of this run, kept.
+#
+# Every step used to delete its own output the moment it finished, and nothing
+# else wrote it down - so the one question a person asks after a failure
+# ("why?") had no source at all once the window was gone. Every line worth
+# reading now goes here as well as to the screen, and the last few runs stay.
+# --------------------------------------------------------------------------- #
+
+$script:RunLogPath = $null
+
+function Start-RunLog {
+    param([string]$Dir, [int]$Keep = 20)
+    try {
+        $null = New-Item -ItemType Directory -Path $Dir -Force
+        $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+        $script:RunLogPath = Join-Path $Dir "refresh-$stamp.log"
+        Set-Content -LiteralPath $script:RunLogPath -Encoding UTF8 `
+            -Value ("IT Ops Console refresh - started {0}Z" -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))
+        # Keep the last few and no more: a log nobody prunes becomes a problem
+        # of its own on a machine that refreshes every day.
+        $old = @(Get-ChildItem -LiteralPath $Dir -Filter 'refresh-*.log' -File -ErrorAction SilentlyContinue |
+                 Sort-Object Name -Descending | Select-Object -Skip $Keep)
+        foreach ($f in $old) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+    } catch { $script:RunLogPath = $null }
+}
+
+function Write-RunLog {
+    param([string]$Line)
+    if (-not $script:RunLogPath) { return }
+    try { Add-Content -LiteralPath $script:RunLogPath -Value $Line -Encoding UTF8 } catch { }
+}
+
+function Say {
+    <# The screen and the record, together. Anything a person would want to
+       read afterwards goes through here rather than Write-Host. #>
+    param([string]$Line)
+    Write-Host $Line
+    Write-RunLog $Line
+}
+
+function Warn {
+    param([string]$Line)
+    Write-Warning $Line
+    Write-RunLog "WARNING: $Line"
 }
 
 # --------------------------------------------------------------------------- #
@@ -225,7 +277,10 @@ function Update-RefreshStatus {
         steps   = @($script:StatusSteps | ForEach-Object {
             [ordered]@{ key=$_.key; label=$_.label; detail=$_.detail; state=$_.state; seconds=$_.seconds; now=$_.now } })
         stats   = @($script:StatusStats)
-        log     = @(@($script:StatusLog.ToArray()) | Select-Object -Last 30)
+        # A run that finished badly is the one a person actually reads, so it
+        # keeps far more of its log than a healthy one needs.
+        log     = @(@($script:StatusLog.ToArray()) |
+                    Select-Object -Last $(if ($script:StatusDone -and -not $script:StatusOk) { 200 } else { 30 }))
     }
     try {
         ('window.PROGRESS = ' + ($payload | ConvertTo-Json -Depth 6 -Compress) + ';') |
@@ -314,6 +369,29 @@ function Read-NewText {
     } finally { $fs.Dispose() }
 }
 
+function Get-StepReason {
+    <# Why a step failed, taken from the most authoritative source that has one.
+
+       The wrapper's own reason file comes first: it cannot be merged with
+       another stream, reordered, or scrolled out of a capped log. Then stderr.
+       Then the last thing the step said on stdout - because every collector is
+       invoked with *>&1, which merges its errors INTO stdout, which is exactly
+       why reading stderr alone came back empty every single time. #>
+    param([string]$ReasonFile, [string]$ErrFile, [string]$OutFile)
+    foreach ($p in @($ReasonFile, $ErrFile, $OutFile)) {
+        if (-not $p -or -not (Test-Path -LiteralPath $p)) { continue }
+        $text = ''
+        try { $text = Get-Content -LiteralPath $p -Raw -ErrorAction Stop } catch { continue }
+        $lines = @("$text" -split "`r?`n" | Where-Object { $_.Trim() })
+        if (-not $lines.Count) { continue }
+        $last = "$($lines[-1])".Trim()
+        # the wrapper prefixes its own copy on stdout; the words are what matter
+        if ($last -like 'ERROR: *') { $last = $last.Substring(7).Trim() }
+        if ($last) { return $last }
+    }
+    return ''
+}
+
 function Stop-ProcessTree {
     param($Process)
     if (-not $Process -or $Process.HasExited) { return }
@@ -372,6 +450,7 @@ function Invoke-Step {
     $outFile = Join-Path $tmp "itops-step-$tag.out"
     $errFile = Join-Path $tmp "itops-step-$tag.err"
     $doneFile = Join-Path $tmp "itops-step-$tag.done"
+    $reasonFile = Join-Path $tmp "itops-step-$tag.why"
 
     $body = New-Object System.Collections.Generic.List[string]
     $body.Add('$ErrorActionPreference = ' + "'Stop'")
@@ -396,7 +475,16 @@ function Invoke-Step {
     $body.Add('$rc = 0')
     $body.Add('try {')
     $body.Add('  & ' + (ConvertTo-PsLiteral $ScriptPath) + ' @stepArgs *>&1 | ForEach-Object { "$_" }')
-    $body.Add('} catch { $rc = 1; "ERROR: " + $_.Exception.Message }')
+    # The reason goes to a file of its own, exactly as the result does. It used
+    # to be written to the OUTPUT stream while the parent read the ERROR stream,
+    # so every failed step came back as "it stopped without saying why". A file
+    # cannot be merged into another stream or scrolled out of a capped log.
+    $body.Add('} catch {')
+    $body.Add('  $rc = 1')
+    $body.Add('  $why = "" + $_.Exception.Message')
+    $body.Add('  try { Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $reasonFile) + ' -Value $why -Encoding UTF8 } catch { }')
+    $body.Add('  "ERROR: $why"')
+    $body.Add('}')
     $body.Add('Set-Content -LiteralPath ' + (ConvertTo-PsLiteral $doneFile) + ' -Value $rc -Encoding ASCII')
     $body.Add('exit $rc')
     Set-Content -Path $wrapper -Value ($body -join [Environment]::NewLine) -Encoding UTF8
@@ -429,7 +517,7 @@ function Invoke-Step {
                 $carry = $parts[-1]
                 for ($i = 0; $i -lt $parts.Count - 1; $i++) {
                     $line = "$($parts[$i])".TrimEnd()
-                    if ($line) { Write-Host $line; Add-StatusLine $StepKey $line }
+                    if ($line) { Say $line; Add-StatusLine $StepKey $line }
                 }
             }
             if ($done) { break }
@@ -441,7 +529,7 @@ function Invoke-Step {
             }
             Start-Sleep -Milliseconds 300
         }
-        if ($carry.Trim()) { Write-Host $carry.Trim(); Add-StatusLine $StepKey $carry.Trim() }
+        if ($carry.Trim()) { Say $carry.Trim(); Add-StatusLine $StepKey $carry.Trim() }
         if (-not $timedOut) { try { $proc.WaitForExit() } catch { } }
         $sw.Stop()
 
@@ -450,7 +538,7 @@ function Invoke-Step {
             Add-Result $Name 'FAILED' "stopped after $TimeoutMinutes minutes" $sw.Elapsed.TotalSeconds
             Add-StatusLine $StepKey "Stopped after $TimeoutMinutes minutes."
             Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain $plain
-            Write-Warning $plain
+            Warn $plain
             return
         }
         # What the wrapper wrote is the answer; the process's own exit code is
@@ -464,14 +552,12 @@ function Invoke-Step {
             if ($null -eq $rc) { $rc = 1 }   # it did not finish cleanly enough to say
         }
         if ($rc -ne 0) {
-            $why = ''
-            try { $why = (Get-Content -LiteralPath $errFile -Raw -ErrorAction Stop) } catch { }
-            $why = @("$why" -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1) -join ''
+            $why = Get-StepReason -ReasonFile $reasonFile -ErrFile $errFile -OutFile $outFile
             if (-not $why) { $why = "it stopped without saying why (result $rc)" }
             Add-Result $Name 'FAILED' $why $sw.Elapsed.TotalSeconds
             Add-StatusLine $StepKey "ERROR: $why"
             Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name $why)
-            Write-Warning "$Name failed: $why"
+            Warn "$Name failed: $why"
             return
         }
         Add-Result $Name 'ok' '' $sw.Elapsed.TotalSeconds
@@ -484,7 +570,9 @@ function Invoke-Step {
         Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name $_.Exception.Message)
         Write-Warning "$Name failed: $($_.Exception.Message)"
     } finally {
-        Remove-Item $wrapper, $outFile, $errFile, $doneFile -Force -ErrorAction SilentlyContinue
+        # The step's own words are in the run log by now (every streamed line
+        # goes through Say), so these scratch files have nothing left to give.
+        Remove-Item $wrapper, $outFile, $errFile, $doneFile, $reasonFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -500,14 +588,14 @@ function Invoke-Native {
         if ($WorkDir) { Set-Location -LiteralPath $WorkDir }
         & $Exe @NativeArgs 2>&1 | ForEach-Object {
             $line = "$_".TrimEnd()
-            if ($line) { Write-Host $line; Add-StatusLine $StepKey $line }
+            if ($line) { Say $line; Add-StatusLine $StepKey $line }
         }
         $code = $LASTEXITCODE
         $sw.Stop()
         if ($code -ne 0) {
             Add-Result $Name 'FAILED' "exit code $code" $sw.Elapsed.TotalSeconds
             Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name "exit code $code")
-            Write-Warning "$Name exited with code $code"
+            Warn "$Name exited with code $code"
         } else {
             Add-Result $Name 'ok' '' $sw.Elapsed.TotalSeconds
             Set-StepState $StepKey 'ok' -Seconds $sw.Elapsed.TotalSeconds
@@ -516,7 +604,7 @@ function Invoke-Native {
         $sw.Stop()
         Add-Result $Name 'FAILED' $_.Exception.Message $sw.Elapsed.TotalSeconds
         Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name $_.Exception.Message)
-        Write-Warning "$Name failed: $($_.Exception.Message)"
+        Warn "$Name failed: $($_.Exception.Message)"
     } finally {
         Set-Location $prev
     }
@@ -551,6 +639,9 @@ $historyRoot = Join-Path $OutputRoot 'history'
 # "Refresh now" button sends you to this page itself, and a run that writes no
 # progress leaves that page sitting on "waiting for the first step" for ever,
 # or - worse - showing the last run's "All done".
+Start-RunLog -Dir (Join-Path $OutputRoot 'logs')
+if ($script:RunLogPath) { Write-Host "This run is being written to $($script:RunLogPath)" }
+
 $tpl = Join-Path $PSScriptRoot 'refresh-status.html'
 if (Test-Path $tpl) {
     try {
@@ -739,7 +830,7 @@ $script:SignIn = [ordered]@{ Mode = 'none'; Ok = $true; Detail = ''; Dropped = @
 function Drop-SignInRung {
     param([string]$Why)
     $script:SignIn.Dropped = @($script:SignIn.Dropped) + $Why
-    Write-Warning $Why
+    Warn $Why
     Add-StatusLine 'signin' $Why
 }
 
@@ -1102,15 +1193,15 @@ if ($SkipAlerts) {
 # Laid out by hand rather than with Format-Table: a non-interactive host (a
 # scheduled task, a CI runner) reports no console width and Format-Table then
 # silently prints nothing at all.
-Write-Host ''
-Write-Host ('=' * 72)
-Write-Host ('{0,-26} {1,-8} {2,7}  {3}' -f 'Step', 'Status', 'Seconds', 'Detail')
-Write-Host ('{0,-26} {1,-8} {2,7}  {3}' -f ('-' * 26), '--------', '-------', ('-' * 24))
+Say ''
+Say ('=' * 72)
+Say ('{0,-26} {1,-8} {2,7}  {3}' -f 'Step', 'Status', 'Seconds', 'Detail')
+Say ('{0,-26} {1,-8} {2,7}  {3}' -f ('-' * 26), '--------', '-------', ('-' * 24))
 foreach ($r in $results.ToArray()) {
     $detail = if ($r.Detail.Length -gt 60) { $r.Detail.Substring(0, 57) + '...' } else { $r.Detail }
-    Write-Host ('{0,-26} {1,-8} {2,7}  {3}' -f $r.Step, $r.Status, $r.Seconds, $detail)
+    Say ('{0,-26} {1,-8} {2,7}  {3}' -f $r.Step, $r.Status, $r.Seconds, $detail)
 }
-Write-Host ''
+Say ''
 
 $failed  = @($results.ToArray() | Where-Object { $_.Status -eq 'FAILED' })
 $missing = @($results.ToArray() | Where-Object { $_.Status -eq 'missing' })
@@ -1122,9 +1213,9 @@ foreach ($r in $failed + $missing) {
     if ($words) { $plain += "  $($r.Step): $words" }
 }
 if ($plain.Count) {
-    Write-Host 'In plain words:'
-    foreach ($line in $plain) { Write-Host $line }
-    Write-Host ''
+    Say 'In plain words:'
+    foreach ($line in $plain) { Say $line }
+    Say ''
 }
 
 $summaryLines = @()
@@ -1133,6 +1224,9 @@ if ($failed.Count -or $missing.Count) {
     foreach ($line in $plain) { $summaryLines += $line.Trim() }
     if ($consoleFailed) { $summaryLines += 'Because the build step failed, the console still shows its previous data.' }
     else { $summaryLines += 'Everything else ran, and the console shows how old each of its numbers is.' }
+    # Where the rest of it is. Without this the only copy of a step's own words
+    # was on a page that hides them the moment the run ends.
+    if ($script:RunLogPath) { $summaryLines += "The full log of this run: $($script:RunLogPath)" }
 } else {
     $summaryLines += 'Everything ran and your console was rebuilt with fresh data.'
     $people = @($script:StatusStats | Where-Object { $_.k -eq 'people' })
@@ -1143,6 +1237,9 @@ if ($failed.Count -or $missing.Count) {
         $summaryLines += "It covers $($people[0].v) people."
     }
 }
+# The outcome belongs at the end of the record too, so the log reads as the
+# whole story rather than stopping at the table.
+foreach ($l in $summaryLines) { Write-RunLog $l }
 Update-RefreshStatus -Done -Ok:(-not ($failed.Count -or $missing.Count)) -Summary $summaryLines -Force
 Write-RefreshStatus -Final $true -Ok (-not ($failed.Count -or $missing.Count)) -Summary $summaryLines
 

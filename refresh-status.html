@@ -74,7 +74,7 @@ h2{font-size:13px;font-weight:650;margin:0 0 8px}
   <div class="railwrap"><div class="rail"><div class="fill" id="fill" style="width:3%"></div></div><div class="rail-lbl" id="raillbl">starting&hellip;</div></div>
   <div class="card" id="steps"></div>
   <div class="card" id="statscard" hidden><h2>What we know so far</h2><div class="chips" id="chips"></div></div>
-  <div class="card" id="logcard"><h2>Live activity</h2><div class="log" id="log">waiting for the first step&hellip;</div></div>
+  <div class="card" id="logcard"><h2 id="loghead">Live activity</h2><div class="log" id="log">waiting for the first step&hellip;</div></div>
   <div class="card done" id="donecard" hidden></div>
 </div>
 <script>
@@ -144,7 +144,12 @@ function render() {
   var lg = document.getElementById('log');
   lg.textContent = (P.log || []).join('\n') || '…';
   lg.scrollTop = lg.scrollHeight;
-  document.getElementById('logcard').hidden = !!P.done;
+  /* A run that finished BADLY is exactly when someone reads this, and hiding
+     it on `done` took the collector's own words off the screen at that moment.
+     A clean run has nothing left to say, so that one still folds away. */
+  document.getElementById('logcard').hidden = !!(P.done && P.ok);
+  document.getElementById('loghead').textContent =
+    (P.done && !P.ok) ? 'What the run said' : 'Live activity';
 
   var dc = document.getElementById('donecard');
   if (P.done) {
