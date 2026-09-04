@@ -39,6 +39,18 @@ from urllib.parse import urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY = 256 * 1024          # a settings block is a few hundred bytes
+# How long a refresh may run before this stops it.
+#
+# Each collector used to carry its own deadline because each ran in a child
+# process that could be killed. On the person route they now run inside the
+# refresh itself - which is what stopped them signing in a second time and
+# failing - so the guarantee moves up here, to the one thing that is still
+# watching. It is deliberately generous: a real refresh of a 200-user tenant
+# takes minutes, not tens of minutes, so anything past this is stuck.
+RUN_DEADLINE_MINUTES = 45
+STOPPED_WORDS = ('The refresh was stopped after {0} minutes because it had not finished. '
+                 'The usual cause is a Microsoft sign-in window waiting behind another '
+                 'window - bring it to the front and finish it, then start the refresh again.')
 TEXT_TYPES = {
     ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
     ".js": "application/javascript; charset=utf-8", ".json": "application/json; charset=utf-8",
@@ -109,9 +121,73 @@ class Runner:
         self.proc = None
         self.started = None
         self.lock = threading.Lock()
+        self.deadline_seconds = RUN_DEADLINE_MINUTES * 60
 
     def busy(self):
         return self.proc is not None and self.proc.poll() is None
+
+    def stop_tree(self, proc=None):
+        """Stop the refresh and anything it started. Killing the PowerShell
+        alone is not enough on Windows - a collector may have started its own
+        child - so taskkill /T is asked first and .kill() is the backstop."""
+        proc = proc or self.proc
+        if proc is None or proc.poll() is not None:
+            return
+        if os.name == "nt":
+            try:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True, timeout=20)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+    def mark_stopped(self, words):
+        """Say so on the live page. Killing the refresh leaves progress.js
+        frozen mid-run, and a page that spins for ever is exactly the thing
+        this is meant to prevent - so the last run's own progress is reopened,
+        marked finished-and-not-ok, and given the sentence in plain words."""
+        path = os.path.join(self.site, "progress.js")
+        payload = None
+        try:
+            with open(path, encoding="utf-8") as fh:
+                raw = fh.read()
+            start, end = raw.find("{"), raw.rfind("}")
+            if start >= 0 and end > start:
+                payload = json.loads(raw[start:end + 1])
+        except (OSError, ValueError):
+            payload = None
+        if not isinstance(payload, dict):
+            payload = {"steps": [], "stats": [], "log": []}
+        payload["done"] = True
+        payload["ok"] = False
+        payload["summary"] = [words]
+        for step in payload.get("steps") or []:
+            if isinstance(step, dict) and step.get("state") == "running":
+                step["state"] = "failed"
+                step["detail"] = words
+        log = payload.get("log")
+        payload["log"] = (log if isinstance(log, list) else []) + [words]
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("window.PROGRESS = " + json.dumps(payload) + ";")
+        except OSError:
+            pass
+
+    def _watch(self, proc, deadline):
+        """One thread per refresh, and it does nothing until the deadline. It
+        is a thread rather than a check inside the API because a stuck run has
+        nobody clicking anything - the whole point is that it ends without
+        being asked."""
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(5)
+        if proc.poll() is not None:
+            return
+        words = STOPPED_WORDS.format(max(1, int(round(self.deadline_seconds / 60.0))))
+        self.stop_tree(proc)
+        self.mark_stopped(words)
 
     def clear_stale_progress(self):
         """The Refresh button sends the browser to the live page a moment after
@@ -155,6 +231,9 @@ class Runner:
             except OSError as e:
                 return False, "Could not start the refresh (%s)." % e
             self.started = time.time()
+            threading.Thread(target=self._watch,
+                             args=(self.proc, self.started + self.deadline_seconds),
+                             daemon=True).start()
             return True, "Refresh started."
 
     def apply_settings(self, text):
@@ -279,6 +358,8 @@ def main(argv=None):
     ap.add_argument("--python", default=None)
     ap.add_argument("--powershell", default=None, help="PowerShell to run the refresh with")
     ap.add_argument("--port", type=int, default=0, help="0 = pick a free one")
+    ap.add_argument("--run-deadline-minutes", type=int, default=RUN_DEADLINE_MINUTES,
+                    help="stop a refresh that has not finished by then (minimum 5)")
     ap.add_argument("--open", action="store_true", help="open a browser at it")
     ap.add_argument("--print-url", action="store_true", help="print the address and keep serving")
     args = ap.parse_args(argv)
@@ -306,6 +387,7 @@ def main(argv=None):
 
     key = secrets.token_urlsafe(24)
     runner = Runner(HERE, site, tool_root, output_root, args.python, args.powershell)
+    runner.deadline_seconds = max(5, args.run_deadline_minutes) * 60
 
     # 127.0.0.1, never 0.0.0.0: this is for the person sitting here.
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(site, key, runner))

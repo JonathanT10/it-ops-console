@@ -175,7 +175,13 @@ function Get-PlainWords {
     switch -Wildcard ($Detail) {
         '*AADSTS*'                       { return 'The sign-in did not complete. Run this again and finish the sign-in window.' }
         '*Authentication needed*'        { return 'You were not signed in. Run this again and finish the sign-in window.' }
-        '*InteractiveBrowserCredential*' { return 'The sign-in window was closed before finishing. Run this again.' }
+        # Not "you closed the window" - there was no window to close. The Graph
+        # SDK asks Microsoft for a token when the FIRST call is made, not when
+        # Connect-MgGraph returns, and when that cannot be answered from what
+        # this account already holds it falls back to a browser sign-in. This
+        # sentence has to send a person somewhere useful; "run this again" on
+        # its own sent them straight back to the same failure.
+        '*InteractiveBrowserCredential*' { return 'Microsoft wanted a fresh sign-in part-way through this step, and there was no window anyone could answer. Run "Refresh IT Ops Data" again and finish the Microsoft sign-in when it appears. If it keeps happening, this section''s read-only permission has not been approved yet - a Global Administrator approves it once.' }
         '*User canceled*'                { return 'The sign-in was cancelled. Run this again when ready.' }
         '*Insufficient privileges*'      { return 'Your account was not allowed to read this data. An administrator needs to approve the read-only permissions once.' }
         '*Authorization_RequestDenied*'  { return 'Your account was not allowed to read this data. An administrator needs to approve the read-only permissions once.' }
@@ -406,18 +412,30 @@ function Invoke-Step {
     <# Runs one collector, times it, and turns a failure into a recorded result
        rather than an aborted run.
 
-       The collector runs in a CHILD PowerShell, not in this one. That is the
-       whole point: a step that blocks - and the way these block is a Microsoft
-       sign-in window opening behind the window you are watching, which nobody
-       ever sees or finishes - cannot be interrupted from inside the process it
-       is blocking. A child can be killed. So it gets a deadline, and if it
-       runs past it the process tree is stopped and the step is reported as
-       "took longer than N minutes" instead of the refresh sitting there for
-       ever. The child is started -NonInteractive too, so a prompt fails rather
-       than waits; the deadline is what makes that a guarantee.
+       There are two ways to run a collector, and which one is used depends
+       on how this run signed in.
 
-       Output is streamed out of the child's redirect files as it appears, so
-       the progress page still shows each stage AS IT HAPPENS. #>
+       IN THIS PROCESS - when a PERSON signed in. The collector inherits the
+       sign-in that just happened, so it never authenticates a second time.
+       That second authentication was the bug: a Graph session does not cross
+       a process boundary, so a child signed in again, and the first Graph
+       call fell back to a browser window inside a hidden -NonInteractive
+       process where nobody could answer it. There is no deadline on this
+       route, because there is nothing left for it to catch that a person
+       sitting at the machine cannot see - and the console's own server stops
+       a run that overruns.
+
+       IN A CHILD POWERSHELL - when the REGISTERED APP signed in, which is the
+       scheduled 7 AM run. Nobody is watching that one, so it keeps the
+       deadline: if the step runs past it the process tree is stopped and the
+       step is reported as "took longer than N minutes" instead of the refresh
+       sitting there for ever. The child is started -NonInteractive too, so a
+       prompt fails rather than waits, and it is handed the certificate
+       connect explicitly.
+
+       Either way the output is streamed AS IT HAPPENS, the step is timed, a
+       failure is recorded rather than aborting the run, and the words that
+       come back are the collector's own. #>
     param(
         [string]$Name,
         [string]$ScriptPath,
@@ -443,6 +461,51 @@ function Invoke-Step {
     Write-Host "--- $Name ".PadRight(72, '-')
     Set-StepState $StepKey 'running'
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    if ($script:StepsInProcess) {
+        # The person route. `&` gives the collector its own scope, so its
+        # $ErrorActionPreference stays its own and an `exit` inside it ends
+        # the collector, not this run - it lands in $LASTEXITCODE instead,
+        # which is how a collector that gives up WITHOUT throwing is now
+        # noticed at all. It used to be recorded as "ok".
+        $rc = 0
+        $why = ''
+        $prevLocation = Get-Location
+        $prevProgress = $ProgressPreference
+        $global:LASTEXITCODE = 0
+        try {
+            $ProgressPreference = 'SilentlyContinue'
+            & $ScriptPath @Arguments *>&1 | ForEach-Object {
+                $line = "$_".TrimEnd()
+                if ($line) { Say $line; Add-StatusLine $StepKey $line }
+            }
+            if ($LASTEXITCODE) {
+                $rc = $LASTEXITCODE
+                $why = "it stopped without saying why (result $rc)"
+            }
+        } catch {
+            $rc = 1
+            $why = "" + $_.Exception.Message
+            Say "ERROR: $why"
+            Add-StatusLine $StepKey "ERROR: $why"
+        } finally {
+            $ProgressPreference = $prevProgress
+            # A collector has no business moving this run's working directory,
+            # and none of them do - but a run that came back somewhere else
+            # would break every relative path after it, so it is put back.
+            try { Set-Location -LiteralPath $prevLocation } catch { }
+        }
+        $sw.Stop()
+        if ($rc -ne 0) {
+            Add-Result $Name 'FAILED' $why $sw.Elapsed.TotalSeconds
+            Set-StepState $StepKey 'failed' -Seconds $sw.Elapsed.TotalSeconds -Plain (Get-PlainWords $Name $why)
+            Warn "$Name failed: $why"
+            return
+        }
+        Add-Result $Name 'ok' '' $sw.Elapsed.TotalSeconds
+        Set-StepState $StepKey 'ok' -Seconds $sw.Elapsed.TotalSeconds
+        return
+    }
 
     $tag = [guid]::NewGuid().ToString('n').Substring(0, 8)
     $tmp = [IO.Path]::GetTempPath()
@@ -988,11 +1051,34 @@ if ($signedIn -and $script:SignIn.Mode -ne 'existing') {
 
 $notSignedIn = if ($signedIn) { $null } else { 'not signed in' }
 
-# Each collector now runs in its own child process, and a Graph session does
-# not cross a process boundary. On the person route that is fine: the child
-# signs in from this account's saved sign-in, already on disk, without a
-# window. The APP route has to be spelled out, because a collector left to
-# itself would ask for delegated scopes instead of using the certificate.
+# One sign-in per run.
+#
+# A Graph session does not cross a process boundary, so when every collector
+# ran in a child process, every child signed in AGAIN. The comment that used
+# to sit here claimed the child picked the sign-in up "from this account's
+# saved sign-in, already on disk, without a window". That was not true, and
+# the run log proved it: Connect-MgGraph acquires no token by itself - the
+# FIRST Graph call does - and when that cannot be answered from what the
+# account already holds, the SDK falls back to a browser sign-in. Inside a
+# hidden -NonInteractive child nobody can ever answer it, so the step stalled
+# for about two minutes and then reported "User canceled authentication" -
+# which nobody had done.
+#
+# So on the PERSON route the collectors run in THIS process, the one that has
+# just signed in. There is no second sign-in, nothing to hand over, and no
+# token written anywhere. If Microsoft does want a fresh sign-in mid-run, the
+# window opens where the person who clicked Refresh can finish it.
+#
+# The APP route is unchanged - child process, certificate connect, deadline.
+# Nobody is watching a 7 AM run, so the kill switch earns its keep there, and
+# an app-only sign-in has no interactive fallback to trip over.
+#
+# What still stops a person-route run that will not end, now that the per-step
+# deadline is not on it: the console's own server stops a refresh it started
+# that overruns; a scheduled while-signed-in run is stopped by the scheduled
+# task's own two-hour execution limit (schedule-refresh.ps1); and a person who
+# double-clicked the icon is sitting in front of the window.
+$script:StepsInProcess = ($script:SignIn.Mode -eq 'user' -or $script:SignIn.Mode -eq 'existing')
 $script:ChildConnect = ''
 if ($script:SignIn.Mode -eq 'app' -and $certInfo.Configured) {
     $script:ChildConnect = ("Connect-MgGraph -ClientId '{0}' -TenantId '{1}' -CertificateThumbprint '{2}' -NoWelcome -ErrorAction Stop" -f
