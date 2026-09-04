@@ -284,22 +284,45 @@ Check 'no problem banner for an unscheduled run' (
 Check 'plain words in the summary' ($r.Text -like '*In plain words:*' -and $r.Text -like '*sign-in: The sign-in did not complete*')
 
 Write-Host ''
-Write-Host '-- 9b. THE BUG: desktop click on an UNATTENDED machine'
-# The certificate lives in the computer's store, where only SYSTEM and
-# Administrators can open its private key. A person clicking Refresh at their
-# desk could see it, tried to use it, failed on "Keyset does not exist", and
-# got a browser sign-in window - every single time. A manual run must not
-# reach for that certificate at all, and must not sign the person out at the
-# end, or the next click asks them to pick their account again.
-$r = Run-Case -Graph 'user-ok' -IniText $iniApp -CertNotAfter $plus700 -Desktop
+Write-Host '-- 9b. desktop click on an UNATTENDED machine, key USABLE: it uses the certificate'
+# This case used to assert the opposite - "the certificate is never touched by
+# a manual run" - because a person who reached for it failed on "Keyset does
+# not exist" and got a browser window dropped in front of them every time.
+# That rule was replaced deliberately once KeyUsable existed to ask the
+# question first: if this account can open the private key, a refresh you
+# click signs in exactly the way the 7 AM run does and never asks you to pick
+# an account. The reason it matters is not convenience - a delegated sign-in
+# only carries what that account was granted, and a call needing anything else
+# sends the SDK off for a token mid-run, which is an account picker, or five.
+$r = Run-Case -Graph 'app-ok' -IniText $iniApp -CertNotAfter $plus700 -Desktop
 Check '9b exit 0' ($r.Code -eq 0)
-Check '9b the certificate is never touched by a manual run' ((Count $r.Log 'connect app*') -eq 0)
+Check '9b a manual run signs in as the registered app' ($r.Status.SignIn.Mode -eq 'app')
+Check '9b and is never asked to pick an account' ((Count $r.Log 'connect user*') -eq 0)
+Check '9b the collectors get the certificate too, not a person prompt' ((Count $r.Log 'connect app*') -eq 4)
+Check '9b it says so before it does it' ($r.Text -like '*will not ask you to pick an account*')
 Check '9b nothing is reported as a failed rung' (@($r.Status.SignIn.Dropped).Count -eq 0)
-Check '9b it says whose sign-in this is, in plain words' ($r.Text -like '*for the scheduled refresh, which runs as this computer*')
-Check '9b signed in as the person' ($r.Status.SignIn.Mode -eq 'user' -and (Count $r.Log 'connect user*') -eq 1)
-Check '9b STAYS signed in, so the next click does not ask again' ((Count $r.Log 'disconnect') -eq 0)
-Check '9b and says so' ($r.Text -like '*Staying signed in to Microsoft 365*')
+Check '9b an app sign-in is still always closed' ((Count $r.Log 'disconnect') -eq 1)
 Check '9b no problem banner - nothing went wrong' (
+    ([regex]::Matches($r.Index, 'class="banner')).Count -eq 1 -and $r.Index -like '*id="filenote"*')
+
+Write-Host ''
+Write-Host '-- 9b2. the same click when this account CANNOT open the key: quiet, signs the person in'
+# The failure the old rule existed to prevent. Nothing is attempted, so there
+# is no "Keyset does not exist" and no window dropped in front of anyone. It
+# is also QUIET: an ordinary desk account that cannot read a machine
+# certificate is the normal case, not a fault, so it must not raise a dropped
+# rung - that would put a banner on the console and fire an alert about a
+# refresh that went on to work perfectly.
+$r = Run-Case -Graph 'user-ok' -IniText $iniApp -CertNotAfter $plus700 -Desktop -NoKey
+Check '9b2 exit 0' ($r.Code -eq 0)
+Check '9b2 the certificate is not attempted when the key will not open' ((Count $r.Log 'connect app*') -eq 0)
+Check '9b2 nothing is reported as a failed rung' (@($r.Status.SignIn.Dropped).Count -eq 0)
+Check '9b2 but it does say why, in plain words' (
+    $r.Text -like '*no private key*' -and $r.Text -like '*This refresh signs you in instead*')
+Check '9b2 signed in as the person' ($r.Status.SignIn.Mode -eq 'user' -and (Count $r.Log 'connect user*') -eq 1)
+Check '9b2 STAYS signed in, so the next click does not ask again' ((Count $r.Log 'disconnect') -eq 0)
+Check '9b2 and says so' ($r.Text -like '*Staying signed in to Microsoft 365*')
+Check '9b2 no problem banner - nothing went wrong' (
     ([regex]::Matches($r.Index, 'class="banner')).Count -eq 1 -and $r.Index -like '*id="filenote"*')
 
 Write-Host ''
