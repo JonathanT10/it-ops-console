@@ -82,8 +82,9 @@ def next_step(kind, key=None):
     if kind == "refresh-signin":
         return 'Double-click "Refresh IT Ops Data" on that computer to sign in; if it keeps happening, re-run setup and check the schedule choice.'
     if kind == "collector-failed":
-        return ("Run \"Refresh IT Ops Data\" once by hand and read the red text for that step; "
-                "check-setup.ps1 says what is missing.")
+        return ("The reason is on the refresh page under \"What the run said\", and in the run "
+                "log in output\\logs. If it is not clear, run \"Refresh IT Ops Data\" by hand "
+                "and read that step's red text.")
     if kind == "certificate":
         return "Re-run setup on that computer and pick unattended refresh again - it makes a new certificate to upload."
     if kind == "new-printer":
