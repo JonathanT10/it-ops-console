@@ -933,29 +933,66 @@ if (-not $needGraph) {
             $script:SignIn.Mode = 'existing'
         }
 
-        # Rung 1: the registered app. This is the SCHEDULED run's route: the
-        # certificate lives in the computer's store, where its private key is
-        # readable by SYSTEM and Administrators - not by you at your desk. So
-        # a refresh you started yourself does not try it. It used to, and the
-        # failure ("Keyset does not exist") dropped a browser sign-in window
-        # in front of whoever clicked Refresh, every single time.
-        if ($script:SignIn.Mode -eq 'none' -and $schedMode -eq 'unattended' -and -not $Scheduled) {
-            $note = 'The registered app and its certificate are for the scheduled refresh, which runs as this computer. This one is yours, so it signs in as you.'
-            Write-Host $note
-            Add-StatusLine 'signin' $note
-        }
-        if ($script:SignIn.Mode -eq 'none' -and $schedMode -eq 'unattended' -and $Scheduled) {
+        # Rung 1: the registered app and this computer's certificate.
+        #
+        # This was the SCHEDULED run's route ONLY. A refresh a person started
+        # was refused it outright, because the private key of a LocalMachine
+        # certificate is readable by SYSTEM and Administrators, and an
+        # ordinary sign-in that reached for it failed on "Keyset does not
+        # exist" - which dropped a browser sign-in window in front of whoever
+        # clicked Refresh, every single time.
+        #
+        # CHANGED DELIBERATELY, and this replaces that decision. A manual run
+        # tries it too - but only after asking whether THIS account can
+        # actually open the private key. That question (Get-RefreshCertificate-
+        # Info's KeyUsable, which really does call GetRSAPrivateKey) is what
+        # was missing when the rung was closed off; with it, the failure the
+        # rule existed to prevent cannot happen. When the key opens, a refresh
+        # you click collects exactly what the 7 AM run collects and never asks
+        # you to pick an account. When it does not, nothing is attempted and
+        # you are signed in exactly as before.
+        #
+        # Why it matters beyond convenience: a delegated sign-in only carries
+        # the permissions that account has been granted, and a call that needs
+        # one it was not granted sends the Graph SDK off to ask for a token
+        # mid-run - which is an account picker, or several. The registered app
+        # holds its read-only permissions outright, so there is nothing to ask
+        # for and nothing to interrupt.
+        #
+        # A manual run stays QUIET about a certificate it cannot use: that is
+        # the ordinary case, not a fault, so it gets a plain sentence instead
+        # of a dropped rung, which would raise a banner and an alert on a run
+        # that went on to work perfectly. A sign-in actually ATTEMPTED that
+        # then fails is still reported either way - that one means the 7 AM
+        # run is broken too. An expiring certificate still shows on the
+        # console regardless: that banner is driven by the recorded expiry,
+        # not by this.
+        if ($script:SignIn.Mode -eq 'none' -and $schedMode -eq 'unattended') {
+            $certWhyNot = ''
             if (-not $certInfo.Configured) {
-                Drop-SignInRung 'Automatic refresh is set to run unattended, but the registered app or its certificate is missing from automatic-refresh.ini - re-run setup to finish that step.'
+                $certWhyNot = 'Automatic refresh is set to run unattended, but the registered app or its certificate is missing from automatic-refresh.ini - re-run setup to finish that step.'
             } elseif ($certInfo.Expired) {
-                Drop-SignInRung ("The automatic-refresh certificate expired on {0} - re-run setup to make a new one and upload it." -f $certInfo.Expires.ToString('yyyy-MM-dd'))
+                $certWhyNot = ("The automatic-refresh certificate expired on {0} - re-run setup to make a new one and upload it." -f $certInfo.Expires.ToString('yyyy-MM-dd'))
             } elseif (-not $certInfo.Present) {
-                Drop-SignInRung "The automatic-refresh certificate ($($certInfo.Thumbprint)) is not in this computer's certificate store."
+                $certWhyNot = "The automatic-refresh certificate ($($certInfo.Thumbprint)) is not in this computer's certificate store."
             } elseif (-not $certInfo.KeyUsable) {
-                Drop-SignInRung ("The automatic-refresh certificate is in this computer's store, but {0}. Re-run setup as an administrator to set it up again." -f $certInfo.KeyWhy)
+                $certWhyNot = ("The automatic-refresh certificate is in this computer's store, but {0}. Re-run setup as an administrator to set it up again." -f $certInfo.KeyWhy)
+            }
+            if ($certWhyNot -and $Scheduled) {
+                Drop-SignInRung $certWhyNot
+            } elseif ($certWhyNot) {
+                $note = "$certWhyNot This refresh signs you in instead."
+                Write-Host $note
+                Add-StatusLine 'signin' $note
             } else {
-                Write-Host 'Connecting to Microsoft Graph as the registered app (read-only)...'
-                Add-StatusLine 'signin' 'Signing in as the registered app - no window needed.'
+                if (-not $Scheduled) {
+                    $note = 'Signing in as the registered app, the same way the automatic refresh does - so this will not ask you to pick an account.'
+                    Write-Host $note
+                    Add-StatusLine 'signin' $note
+                } else {
+                    Write-Host 'Connecting to Microsoft Graph as the registered app (read-only)...'
+                    Add-StatusLine 'signin' 'Signing in as the registered app - no window needed.'
+                }
                 try {
                     Connect-MgGraph -ClientId $certInfo.ClientId -TenantId $certInfo.TenantId `
                         -CertificateThumbprint $certInfo.Thumbprint -NoWelcome -ErrorAction Stop
