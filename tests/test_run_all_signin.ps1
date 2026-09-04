@@ -378,11 +378,35 @@ try {
     $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop
     $lic = @($r.Status.Steps | Where-Object { $_.Step -eq 'm365-license-waste-report' })[0]
     Check '9g the failing step is reported failed' ($lic.Status -eq 'FAILED')
+    # "not blank" was satisfied by the placeholder "it stopped without saying
+    # why (result 1)", and the words check looked at $r.Text - the whole console
+    # transcript, where the child's output always appears because the parent
+    # echoes it. So both passed for six versions while the RECORDED detail said
+    # nothing. What matters is what was written down, so check that.
     Check '9g with a reason, not a blank one' ($lic.Detail -and $lic.Detail.Trim().Length -gt 0)
-    Check '9g the reason is the collector''s own words' ($r.Text -like '*could not read the tenant*')
+    Check '9g the RECORDED reason is the collector''s own words' ($lic.Detail -like '*could not read the tenant*')
+    Check '9g and is never the placeholder' ($lic.Detail -notlike '*without saying why*')
+    Check '9g the transcript has it too' ($r.Text -like '*could not read the tenant*')
     Check '9g the OTHER collectors are still ok' (
         @($r.Status.Steps | Where-Object { $_.Step -eq 'entra-tenant-docs' -and $_.Status -eq 'ok' }).Count -eq 1)
     Check '9g the console was still built' ($r.Index.Length -gt 0)
+    # The summary used to print "N step(s) had problems:" and then list nothing,
+    # because the plain-words lookup returned $null for anything it could not
+    # translate and the caller skipped it.
+    Check '9g the summary names the step that failed' ($r.Text -like '*m365-license-waste-report:*')
+    Check '9g and says why, under "In plain words"' (
+        $r.Text -like '*In plain words:*' -and $r.Text -like '*could not read the tenant*')
+    # The evidence has to outlive the window: every step used to delete its own
+    # output, and nothing else wrote it down.
+    $logDir = Join-Path $out 'logs'
+    $logs = @(Get-ChildItem -LiteralPath $logDir -Filter 'refresh-*.log' -File -ErrorAction SilentlyContinue)
+    Check '9g a log of the run was kept' ($logs.Count -ge 1)
+    $logText = if ($logs.Count) { Get-Content -LiteralPath ($logs | Sort-Object Name -Descending)[0].FullName -Raw } else { '' }
+    Check '9g the log carries the collector''s own words' ($logText -like '*could not read the tenant*')
+    Check '9g the log carries the summary table too' ($logText -like '*m365-license-waste-report*FAILED*')
+    Check '9g the run names its log on screen as it starts' ($r.Text -like '*is being written to*')
+    Check '9g and the finish points at it' ($r.Status.Message -like '*The full log of this run:*')
+    Check '9g the log ends with the outcome' ($logText -like '*step(s) had problems*')
 } finally {
     Set-Content $boom $boomKeep
 }

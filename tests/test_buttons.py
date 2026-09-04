@@ -138,6 +138,48 @@ def main():
                   "cannot change anything" in said and 'IT Ops Console' in said)
             check("as a file: it does not hand you a file to carry to an icon",
                   "Downloads" not in said and "Ctrl+C" not in said)
+            # ---- 3. the live page after a run that went wrong ---- #
+            # The collector's own words stream into this log while a step runs.
+            # It used to be hidden the instant the run finished - which is the
+            # exact moment a person goes looking for them.
+            live = os.path.join(tmp, "live")
+            os.makedirs(live, exist_ok=True)
+            shutil.copy(os.path.join(ROOT, "refresh-status.html"),
+                        os.path.join(live, "status.html"))
+
+            def progress(done, ok, log):
+                with open(os.path.join(live, "progress.js"), "w", encoding="utf-8") as fh:
+                    fh.write("window.PROGRESS=" + json.dumps({
+                        "done": done, "ok": ok,
+                        "summary": ["1 step(s) had problems:"],
+                        "steps": [{"key": "security", "label": "Checking security posture",
+                                   "detail": "the licence report could not read the tenant",
+                                   "state": "failed", "seconds": 122, "now": None}],
+                        "stats": [], "log": log}) + ";")
+
+            progress(True, False, ["stub: about to fail",
+                                   "ERROR: the licence report could not read the tenant"])
+            page.goto("file://" + os.path.join(live, "status.html"))
+            page.wait_for_function(
+                "document.getElementById('donecard') && !document.getElementById('donecard').hidden",
+                timeout=15000)
+            check("live page: a run that ended badly KEEPS its log on screen",
+                  page.is_visible("#logcard"))
+            check("live page: and says what it is",
+                  page.inner_text("#loghead").strip() == "What the run said")
+            check("live page: the collector's own words are in it",
+                  "could not read the tenant" in page.inner_text("#log"))
+            check("live page: the failed step shows the reason, not its usual description",
+                  "could not read the tenant" in page.inner_text("#steps"))
+
+            progress(True, True, ["all good"])
+            page.goto("file://" + os.path.join(live, "status.html"))
+            page.wait_for_function(
+                "document.getElementById('donecard') && !document.getElementById('donecard').hidden",
+                timeout=15000)
+            check("live page: a run that went fine still folds the log away",
+                  page.is_hidden("#logcard"))
+
             browser.close()
     finally:
         proc.terminate()
