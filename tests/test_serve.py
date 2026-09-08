@@ -20,6 +20,8 @@ stubs that record how they were called.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -35,6 +37,31 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 FAILS = []
+
+
+def _cli_default(mod, flag):
+    """The default argparse would apply for a flag, without running main."""
+    import argparse
+    seen = {}
+    real = argparse.ArgumentParser.add_argument
+
+    def spy(self, *a, **kw):
+        for name in a:
+            if name == flag:
+                seen[flag] = kw.get("default")
+        return real(self, *a, **kw)
+
+    argparse.ArgumentParser.add_argument = spy
+    quiet = io.StringIO()
+    try:
+        try:
+            with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+                mod.main(["--help"])       # prints the usage nobody here needs
+        except SystemExit:
+            pass
+    finally:
+        argparse.ArgumentParser.add_argument = real
+    return seen.get(flag)
 
 
 def check(label, cond):
@@ -356,6 +383,134 @@ def main():
         check("deadline: it can say so even with no progress file to build on",
               "test words" in bare and '"done": true' in bare)
         sh.rmtree(d, ignore_errors=True)
+
+    # ---- one address, the same one every time ---- #
+    # It used to ask the operating system for any free port, so the console
+    # lived somewhere different on every launch: nothing to bookmark, and the
+    # address in your history was wrong by the next morning.
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import socket as _socket
+    import threading as _threading
+
+    check("port: there is a usual address, and it is a real fixed port",
+          isinstance(mod.DEFAULT_PORT, int) and 1024 < mod.DEFAULT_PORT < 65535)
+    check("port: and it is what you get without asking",
+          mod.main.__doc__ is not mod.DEFAULT_PORT and
+          _cli_default(mod, "--port") == mod.DEFAULT_PORT)
+
+    def _free_port():
+        s = _socket.socket()
+        s.bind(("127.0.0.1", 0))
+        p_ = s.getsockname()[1]
+        s.close()
+        return p_
+
+    base = _free_port()
+    srv, got = mod.bind_console(base, BaseHTTPRequestHandler)
+    check("port: a free usual address is the one it takes", got == base)
+    srv.server_close()
+
+    # something else is sitting on it: move along rather than refuse to start
+    holder = _socket.socket()
+    holder.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    holder.bind(("127.0.0.1", base))
+    holder.listen(1)
+    srv, got = mod.bind_console(base, BaseHTTPRequestHandler)
+    check("port: taken usual address moves along by one, it does not fail",
+          got == base + 1)
+    srv.server_close()
+
+    # the whole ladder is taken: still start, anywhere
+    holders = [holder]
+    for i in range(1, mod.PORT_LADDER):
+        h = _socket.socket()
+        h.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        try:
+            h.bind(("127.0.0.1", base + i))
+            h.listen(1)
+            holders.append(h)
+        except OSError:
+            h.close()
+    srv, got = mod.bind_console(base, BaseHTTPRequestHandler)
+    check("port: with every usual address taken it still starts somewhere",
+          got and got not in range(base, base + mod.PORT_LADDER))
+    srv.server_close()
+    for h in holders:
+        h.close()
+
+    # Windows lets a second server bind a port another is LISTENING on when
+    # SO_REUSEADDR is set - two consoles, and the one-refresh-at-a-time lock
+    # quietly meaningless. It has to be off there.
+    check("port: address reuse is off on Windows, on everywhere else",
+          mod.ConsoleServer.allow_reuse_address == (os.name != "nt"))
+
+    # A console already running is found at the usual address even when the
+    # note it leaves behind says nothing - that is the point of a usual address.
+    class _NotUs(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    stranger_port = _free_port()
+    stranger = HTTPServer(("127.0.0.1", stranger_port), _NotUs)
+    _threading.Thread(target=stranger.serve_forever, daemon=True).start()
+    check("port: something else answering on a port is not mistaken for the console",
+          mod.already_serving(None, [stranger_port]) is None)
+    stranger.shutdown()
+    stranger.server_close()
+
+    live_port = _free_port()
+    d2 = tempfile.mkdtemp(prefix="itops-port-")
+    s2 = os.path.join(d2, "console-site")
+    o2 = os.path.join(d2, "output")
+    os.makedirs(s2)
+    os.makedirs(o2)          # so the note is written, and can then be taken away
+    with open(os.path.join(s2, "index.html"), "w", encoding="utf-8") as fh:
+        fh.write("<html><body>hi</body></html>")
+    c2 = os.path.join(d2, "tools", "it-ops-console")
+    os.makedirs(c2)
+    shutil.copy(os.path.join(ROOT, "serve-console.py"), os.path.join(c2, "serve-console.py"))
+    first = subprocess.Popen(
+        [sys.executable, os.path.join(c2, "serve-console.py"), "--site", s2,
+         "--tool-root", os.path.join(d2, "tools"), "--output-root", o2,
+         "--port", str(live_port), "--print-url"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        limit = time.time() + 30
+        while time.time() < limit and not mod.already_serving(None, [live_port]):
+            time.sleep(0.3)
+        check("port: a console at the usual address is found with no note to read",
+              mod.already_serving(None, [live_port]) == "http://127.0.0.1:%d/" % live_port)
+        # Take the note away. The usual address is now the ONLY way a second
+        # launch can know the first is there - which is the point of having one.
+        try:
+            os.remove(os.path.join(o2, "console-server.json"))
+        except OSError:
+            pass
+        try:
+            second = subprocess.run(
+                [sys.executable, os.path.join(c2, "serve-console.py"), "--site", s2,
+                 "--tool-root", os.path.join(d2, "tools"), "--output-root", o2,
+                 "--port", str(live_port)],
+                capture_output=True, text=True, timeout=45)
+            said = second.stdout
+        except subprocess.TimeoutExpired:
+            # It did not recognise the running console and started serving.
+            said = ""
+        check("port: with the note gone it still opens the console you have",
+              "already running" in said and str(live_port) in said)
+    finally:
+        first.terminate()
+        try:
+            first.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            first.kill()
+            first.wait(timeout=10)
+        sh.rmtree(d2, ignore_errors=True)
 
     print("")
     if FAILS:
