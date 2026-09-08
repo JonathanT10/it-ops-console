@@ -883,12 +883,15 @@ def render_example_ini():
 # Editing alerts.ini from the console
 #
 # The Alerts page can produce a small settings block - rules and schedule only,
-# never [teams] or [email], so no webhook or address is ever embedded in a page
-# or put on the clipboard. apply-alerts.py MERGES that block into the real
-# alerts.ini: your comments, your channel settings and anything this console
-# does not recognise stay exactly as they were, and only the lines you changed
-# move. The parse and the merge live here so both the CLI and the tests use the
-# same code the console itself uses to read the file.
+# never [teams] or [email], so no webhook or address is ever embedded in a
+# page. "Apply settings" hands that block to the console's own server, which
+# passes it to apply-settings.py; it MERGES the block into the real alerts.ini
+# so your comments, your channel settings and anything this console does not
+# recognise stay exactly as they were, and only the lines you changed move.
+# (This used to say apply-alerts.py, which has never existed, and described
+# carrying the block on the clipboard - the route v1.6.0 replaced.) The parse
+# and the merge live here so the CLI, the server and the tests all use the same
+# code the console itself uses to read the file.
 # --------------------------------------------------------------------------- #
 
 CHANNEL_SECTIONS = ("teams", "email")
@@ -947,7 +950,7 @@ def parse_settings_fragment(text):
     order they appeared - one for alerts.ini, one for the printer collector's
     config.ini - and plain sentences about anything skipped. Raises ValueError
     when the text holds nothing this console recognises, which is how "Apply
-    Settings" tells settings apart from whatever else is on the clipboard.
+    settings" tells a settings block apart from any other text handed to it.
     """
     settings, notes, order = {}, [], []
     section = None

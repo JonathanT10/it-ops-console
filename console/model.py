@@ -528,6 +528,22 @@ def refresh_model(feed):
         note = 'Automatic refresh is off - "Refresh IT Ops Data" on the desktop updates this console.'
 
     banners = []
+    # The schedule says what this computer is SET UP to do. Whether the job
+    # that does it still exists is a different question, and until run-all
+    # started asking it nothing compared the two: an ini saying "every day at
+    # 07:00" and no scheduled job at all look identical from here, and that is
+    # exactly what a real machine sat in for days. TaskPresent is deliberately
+    # three-valued - only a definite False says this, because a computer that
+    # could not ask must never be told its schedule has vanished.
+    if mode in ("while-signed-in", "unattended") and sched.get("TaskPresent") is False:
+        banners.append({
+            "tone": "serious",
+            "text": ("This computer is set to refresh every day at %s, but that job is not in "
+                     "Task Scheduler - so nothing is refreshing on its own, and these numbers "
+                     "only change when someone clicks Refresh. Re-run setup and pick the same "
+                     "answer to put it back." % (time_ or "the set time")),
+            "detail": "",
+        })
     # A refresh that could not sign in AT ALL leaves every Microsoft 365 number
     # behind, and that is worth saying whoever started it. It used to be said
     # only for scheduled runs, so a refresh a person clicked could fail to
