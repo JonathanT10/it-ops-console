@@ -97,16 +97,38 @@ $env:ITOPS_STUB_LOG = $log
 # The certificate store does not exist off Windows, so the child session gets a
 # Get-Item that answers Cert: paths from ITOPS_STUB_CERT_NOTAFTER (set = the
 # certificate is present with that expiry; unset = not in the store).
+#
+# It hands back a REAL X509Certificate2 with a real private key, not a stand-in
+# object. That matters: the usability check does not just ask for the key, it
+# SIGNS something with it - because on Windows the handle comes back happily
+# and the first real operation is where "Keyset does not exist" appears. A
+# stand-in object makes GetRSAPrivateKey throw, which the check treats as
+# "cannot tell, let the sign-in decide" - so the signing path would never run
+# in any test. With a real certificate it runs on every case that reaches it.
+# ITOPS_STUB_CERT_NOKEY strips the private key, exactly as a certificate
+# imported without one behaves.
 $preamble = @'
+$global:ItopsStubCert = $null
 function Get-Item {
     [CmdletBinding()] param([Parameter(Position=0)][string]$Path, [string]$LiteralPath, [switch]$Force)
     if ($Path -like 'Cert:*') {
         if ($env:ITOPS_STUB_CERT_NOTAFTER) {
-            return [pscustomobject]@{
-                NotAfter      = [datetime]$env:ITOPS_STUB_CERT_NOTAFTER
-                Thumbprint    = ($Path -split '[\\/]')[-1]
-                HasPrivateKey = ($env:ITOPS_STUB_CERT_NOKEY -ne '1')
+            if (-not $global:ItopsStubCert) {
+                $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+                $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+                    'CN=itops-test', $rsa,
+                    [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                    [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+                $notAfter = [datetimeoffset]([datetime]$env:ITOPS_STUB_CERT_NOTAFTER)
+                $cert = $req.CreateSelfSigned($notAfter.AddDays(-3650), $notAfter)
+                if ($env:ITOPS_STUB_CERT_NOKEY -eq '1') {
+                    # the public half only - HasPrivateKey is then genuinely false
+                    $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                        $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+                }
+                $global:ItopsStubCert = $cert
             }
+            return $global:ItopsStubCert
         }
         throw "Cannot find path '$Path' because it does not exist."
     }
@@ -279,8 +301,15 @@ $r = Run-Case -Graph 'user-fail' -Desktop
 Check 'exit 1' ($r.Code -eq 1)
 Check 'reason recorded' (@($r.Status.SignIn.Dropped)[0] -like 'The sign-in did not complete: InteractiveBrowserCredential*')
 Check 'console built' ($r.Index.Length -gt 0)
-Check 'no problem banner for an unscheduled run' (
-    ([regex]::Matches($r.Index, 'class="banner')).Count -eq 1 -and $r.Index -like '*id="filenote"*')
+# This used to assert NO banner, because the overview only ever raised one for
+# a scheduled run. That was wrong: he clicked Refresh, it could not sign in,
+# so every Microsoft 365 number on the page is from the run before - and the
+# page looked exactly like a healthy one. It says so now.
+Check 'a manual run that could not sign in DOES say so on the overview' (
+    ([regex]::Matches($r.Index, 'class="banner')).Count -eq 2 -and $r.Index -like '*id="filenote"*')
+Check 'and in words about THIS run, not the schedule' (
+    $r.Index -like '*The last refresh*' -and $r.Index -like "*couldn&#x27;t sign in*" -and
+    $r.Index -notlike '*The last automatic refresh*')
 Check 'plain words in the summary' ($r.Text -like '*In plain words:*' -and $r.Text -like '*sign-in: The sign-in did not complete*')
 
 Write-Host ''

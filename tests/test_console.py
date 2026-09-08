@@ -20,7 +20,7 @@ sys.path.insert(0, ROOT_DIR)
 
 from console import model, pages                      # noqa: E402
 from console.render import write_page                 # noqa: E402
-from console.sources import Feed, freshness, load_all, parse_ts  # noqa: E402
+from console.sources import Feed, freshness, load_all, parse_ts, utcnow  # noqa: E402
 
 FAILS = []
 
@@ -55,6 +55,74 @@ def test_freshness():
     check("freshness: hours render as hours", human.endswith("h ago"))
     _, human = freshness(NOW - timedelta(days=4))
     check("freshness: days render as days", human.endswith("d ago"))
+
+
+def test_not_updated_by_the_last_refresh():
+    """Age alone cannot say "the run that just finished failed to update this".
+
+    A collector that fails at lunchtime leaves yesterday evening's file sitting
+    there at seventeen hours old - inside the 26-hour line - so the page showed
+    a green dot and a cheerful "17h ago" on numbers the refresh had just failed
+    to collect. That is exactly what a real run did, and the console said
+    nothing about it anywhere."""
+    from console.sources import mark_not_updated
+
+    def feed(key, hours):
+        return Feed(key, key.title(), "x", data={"k": 1}, ts=utcnow() - timedelta(hours=hours))
+
+    feeds = {
+        "security": feed("security", 17),
+        "security_history": feed("security_history", 17),
+        "licensing": feed("licensing", 17),
+        "tenant": feed("tenant", 1),
+        "refresh_status": Feed("refresh_status", "Automatic refresh", "x", ts=utcnow(), data={
+            "Steps": [
+                {"Step": "entra-security-snapshot", "Status": "FAILED",
+                 "Detail": "the tenant refused to be read"},
+                {"Step": "m365-license-waste-report", "Status": "ok", "Detail": ""},
+            ]}),
+    }
+    check("not-updated: a 17h feed is 'fresh' on age alone",
+          feeds["security"].state == "fresh")
+    mark_not_updated(feeds)
+    sec = feeds["security"]
+    check("not-updated: the failed collector's feed is no longer fresh",
+          sec.state == "aging")
+    check("not-updated: it carries the collector's own words",
+          sec.stale_reason == "the tenant refused to be read")
+    check("not-updated: the tile says so instead of just an age",
+          sec.foot_note.startswith("not updated by the last refresh") and "17h ago" in sec.foot_note)
+    check("not-updated: and so does the longer note",
+          "the last refresh could not update this" in sec.status_note)
+    check("not-updated: every feed that collector writes is marked, not just one",
+          feeds["security_history"].stale_reason != "")
+    check("not-updated: a collector that WORKED leaves its feed alone",
+          feeds["licensing"].stale_reason == "" and feeds["licensing"].state == "fresh"
+          and feeds["licensing"].foot_note == feeds["licensing"].age)
+    check("not-updated: a feed no failed step writes is untouched",
+          feeds["tenant"].stale_reason == "" and feeds["tenant"].state == "fresh")
+
+    # A feed that was ALREADY past the line does not get quietly promoted.
+    old_feeds = {
+        "security": Feed("security", "Security", "x", data={"k": 1}, ts=utcnow() - timedelta(days=30)),
+        "refresh_status": Feed("refresh_status", "Automatic refresh", "x", ts=utcnow(), data={
+            "Steps": [{"Step": "entra-security-snapshot", "Status": "FAILED", "Detail": "nope"}]}),
+    }
+    mark_not_updated(old_feeds)
+    check("not-updated: a feed that was already stale stays stale",
+          old_feeds["security"].state == "stale" and old_feeds["security"].stale_reason == "nope")
+
+    # And nothing to read from is never a reason to break the build.
+    empty = {"security": feed("security", 17)}
+    mark_not_updated(empty)
+    check("not-updated: no refresh-status feed at all is harmless",
+          empty["security"].stale_reason == "" and empty["security"].state == "fresh")
+    broken = {"security": feed("security", 17),
+              "refresh_status": Feed("refresh_status", "Automatic refresh", "x",
+                                     error="ValueError: nope")}
+    mark_not_updated(broken)
+    check("not-updated: an unreadable refresh-status is harmless too",
+          broken["security"].stale_reason == "")
 
 
 def test_parse_ts():
@@ -742,10 +810,27 @@ def test_refresh_model():
     check("refresh: failed sign-in banner carries the detail",
           "Nobody finished" in failed["banners"][0]["detail"])
 
-    # A desktop click that could not sign in is not the schedule's problem.
+    # A refresh a PERSON started that could not sign in leaves every Microsoft
+    # 365 number behind, exactly as a scheduled one does. This used to be
+    # silent: the banner was gated on Scheduled, so a failed manual refresh
+    # left an overview that looked identical to a healthy one.
     desk = model.refresh_model(_refresh_feed(Scheduled=False, Ok=False,
                                              SignIn={"Mode": "none", "Ok": False, "Detail": "x", "Dropped": ["x"]}))
-    check("refresh: an unscheduled run never raises a banner", desk["banners"] == [])
+    check("refresh: a manual run that could not sign in DOES raise a banner",
+          len(desk["banners"]) == 1 and "couldn't sign in" in desk["banners"][0]["text"])
+    # every follow-up check guards on that, so a regression FAILS rather than
+    # crashing the suite and hiding everything after it
+    check("refresh: and it does not call a manual run automatic",
+          bool(desk["banners"])
+          and desk["banners"][0]["text"].startswith("The last refresh")
+          and "automatic" not in desk["banners"][0]["text"])
+    # But a manual run that fell back to another sign-in and then WORKED is
+    # not worth a banner - the person clicked Refresh and got their data.
+    desk_ok = model.refresh_model(_refresh_feed(
+        Scheduled=False, SignIn={"Mode": "user", "Ok": True, "Detail": "Signed in with read-only access",
+                                 "Dropped": ["Signing in as the registered app failed: Keyset does not exist"]}))
+    check("refresh: a manual run that fell back and then worked stays quiet",
+          desk_ok["banners"] == [])
 
     dropped = model.refresh_model(_refresh_feed(SignIn={
         "Mode": "user", "Ok": True, "Detail": "Signed in with read-only access",
@@ -1043,9 +1128,38 @@ def test_overview_panel():
     check("panel: it points at where to change what counts", 'href="alerts.html">Alerts</a>' in chunk)
     check("panel: informational findings stay on their own page (toner is not here)",
           "Toner" not in chunk and "Magenta" not in chunk)
-    check("panel: the refresh's own troubles are not duplicated here",
-          "could not sign in" not in chunk and "automatic-refresh certificate" not in chunk
-          and "did not complete" not in chunk and "data is" not in chunk)
+    check("panel: what the banner above already says is not repeated here",
+          "could not sign in" not in chunk and "automatic-refresh certificate" not in chunk)
+    check("panel: and neither is plain age, which every tile already carries",
+          "data is 3 days old" not in chunk)
+
+    # THE GAP THIS CLOSES. A collector that fails leaves its page showing
+    # yesterday's numbers, and the panel used to drop the whole refresh tab -
+    # so two sections could fail and the overview said nothing at all.
+    broke = dict(models)
+    broke["refresh"] = model.refresh_model(_refresh_feed(
+        Ok=False,
+        Steps=[{"Step": "entra-security-snapshot", "Status": "FAILED",
+                "Detail": "the tenant refused to be read"},
+               {"Step": "m365-license-waste-report", "Status": "ok", "Detail": ""}]))
+    broke_feeds = dict(feeds)
+    broke_feeds["refresh_status"] = _refresh_feed(
+        Ok=False,
+        Steps=[{"Step": "entra-security-snapshot", "Status": "FAILED",
+                "Detail": "the tenant refused to be read"},
+               {"Step": "m365-license-waste-report", "Status": "ok", "Detail": ""}])
+    broke["fired"] = A.evaluate(cfg, broke, broke_feeds, now=now)
+    broke_html = pages.build_overview(broke, broke_feeds, avail, "now")
+    broke_chunk = (broke_html[broke_html.index("Needs a human"):broke_html.index("Stale data")]
+                   if "Stale data" in broke_html else broke_html[broke_html.index("Needs a human"):])
+    check("panel: a collector that did not complete reaches the panel",
+          "entra-security-snapshot did not complete" in broke_chunk)
+    check("panel: with the collector's own words, not a generic line",
+          "the tenant refused to be read" in broke_chunk)
+    check("panel: a collector that DID complete is not named",
+          "m365-license-waste-report did not complete" not in broke_chunk)
+    check("panel: nothing links to a refresh page, because there is no refresh page",
+          'href="refresh.html"' not in broke_html)
 
     # turning a rule off takes it off the front page too - the whole point
     off = A.load_config(os.path.join(here, "alerts.example.ini"))
@@ -1312,6 +1426,7 @@ def test_render_full(tmp):
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         test_freshness()
+        test_not_updated_by_the_last_refresh()
         test_parse_ts()
         test_loading(os.path.join(tmp, "load"))
         test_identity_model()
