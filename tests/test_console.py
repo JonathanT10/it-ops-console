@@ -832,6 +832,39 @@ def test_refresh_model():
     check("refresh: a manual run that fell back and then worked stays quiet",
           desk_ok["banners"] == [])
 
+    # The schedule says what this computer is SET UP to do. Whether the job
+    # that does it still exists is a different question, and nothing compared
+    # the two - so an ini saying "every day at 07:00" and no scheduled job at
+    # all looked identical on the page, which is what a real machine sat in for
+    # four days.
+    def sched(mode="unattended", present=None, time_="07:00"):
+        s_ = {"Mode": mode, "Time": time_, "RunAs": "SYSTEM"}
+        if present is not None:
+            s_["TaskPresent"] = present
+        return model.refresh_model(_refresh_feed(Schedule=s_))
+
+    gone = sched(present=False)
+    check("schedule: a schedule with no task behind it raises a banner",
+          any("not in Task Scheduler" in b["text"] for b in gone["banners"]))
+    check("schedule: and says what it means, not just what is missing",
+          any("nothing is refreshing on its own" in b["text"] and "07:00" in b["text"]
+              for b in gone["banners"]))
+    check("schedule: it is treated as serious",
+          any(b["tone"] == "serious" for b in gone["banners"] if "Task Scheduler" in b["text"]))
+    check("schedule: a task that IS there says nothing",
+          sched(present=True)["banners"] == [])
+    # Three-valued on purpose: a machine that could not ask must never be told
+    # its schedule has vanished.
+    check("schedule: 'could not tell' is not 'missing'",
+          sched(present=None)["banners"] == [])
+    check("schedule: an older run that never recorded it is not 'missing' either",
+          sched()["banners"] == [])
+    check("schedule: nothing scheduled means nothing to be missing",
+          sched(mode="off", present=False)["banners"] == [])
+    check("schedule: while-signed-in is checked too, not only unattended",
+          any("not in Task Scheduler" in b["text"]
+              for b in sched(mode="while-signed-in", present=False)["banners"]))
+
     dropped = model.refresh_model(_refresh_feed(SignIn={
         "Mode": "user", "Ok": True, "Detail": "Signed in with read-only access",
         "Dropped": ["Signing in as the registered app failed: AADSTS700027 bad key."]}))

@@ -253,6 +253,15 @@ Check 'no user sign-in attempted' ((Count $r.Log 'connect user*') -eq 0)
 Check 'app sign-in always closed' ((Count $r.Log 'disconnect') -eq 1)
 Check 'nothing dropped' (@($r.Status.SignIn.Dropped).Count -eq 0)
 Check 'certificate days left from the store' ($r.Status.Certificate.Present -eq $true -and $r.Status.Certificate.DaysLeft -ge 698 -and $r.Status.Certificate.DaysLeft -le 700)
+# The run records WHICH job is supposed to do this and whether it is actually
+# in Task Scheduler, so the console can stop promising a refresh that has no
+# job behind it. Three-valued: here there is no Task Scheduler to ask, and
+# "could not tell" must come back as null - never as "missing", which would
+# put a banner on every non-Windows build.
+Check 'the run records the scheduled job it expects' (
+    $r.Status.Schedule.Task -eq 'IT Ops Console - automatic refresh')
+Check 'and says "could not tell" rather than "missing" when it cannot ask' (
+    $null -eq $r.Status.Schedule.TaskPresent)
 Check 'footer note names the app route' ($r.Index -like '*as the registered app, whether or not anyone is signed in*')
 Check 'no problem banner, only the file note' (
     ([regex]::Matches($r.Index, 'class="banner')).Count -eq 1 -and $r.Index -like '*id="filenote"*')

@@ -58,6 +58,8 @@ function New-ScheduledTaskSettingsSet { param([switch]$StartWhenAvailable, $Mult
     @{ StartWhenAvailable = [bool]$StartWhenAvailable; MultipleInstances = "$MultipleInstances"; ExecutionTimeLimit = "$ExecutionTimeLimit" } }
 function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) @{ UserId = $UserId; LogonType = "$LogonType"; RunLevel = "$RunLevel" } }
 function Register-ScheduledTask { param($TaskName, $Action, $Trigger, $Settings, $Principal, [switch]$Force, $Description)
+    Add-Content $env:ITOPS_STUB_LOG "register $TaskName force=$([bool]$Force)"
+    if ($env:ITOPS_STUB_REG_FAIL -eq '1') { throw 'Access is denied. (Exception from HRESULT: 0x80070005)' }
     $t = @{ TaskName = $TaskName; Action = $Action; Trigger = $Trigger; Settings = $Settings; Principal = $Principal; Description = $Description }
     $t | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $env:ITOPS_STUB_TASKS ("$TaskName.json" -replace '[^A-Za-z0-9. -]', '_'))
     $t }
@@ -66,6 +68,7 @@ function Get-ScheduledTask { [CmdletBinding()] param($TaskName)
     if (Test-Path $f) { return (Get-Content $f -Raw | ConvertFrom-Json) }
     throw "No MSFT_ScheduledTask objects found with property 'TaskName' equal to '$TaskName'." }
 function Unregister-ScheduledTask { [CmdletBinding()] param($TaskName, [switch]$Confirm)
+    Add-Content $env:ITOPS_STUB_LOG "unregister $TaskName"
     $f = Join-Path $env:ITOPS_STUB_TASKS ("$TaskName.json" -replace '[^A-Za-z0-9. -]', '_')
     if (Test-Path $f) { Remove-Item $f } }
 function New-SelfSignedCertificate { param($Subject, $CertStoreLocation, $KeyExportPolicy, $KeySpec, $KeyAlgorithm, $KeyLength, $HashAlgorithm, $KeyUsage, $NotAfter)
@@ -93,9 +96,10 @@ function Get-Item {
 '@
 
 function Run-Sched {
-    param([string]$ArgText, [string]$Graph = '')
+    param([string]$ArgText, [string]$Graph = '', [switch]$RegFail)
     if (Test-Path $log) { Remove-Item $log }
     $env:ITOPS_STUB_GRAPH = $Graph
+    $env:ITOPS_STUB_REG_FAIL = if ($RegFail) { '1' } else { $null }
     $cmd = $preamble + "`n& '$consoleDir/schedule-refresh.ps1' -Root '$root' -NoPrompt $ArgText"
     $text = (& pwsh -NoProfile -Command $cmd 2>&1 | Out-String)
     $code = $LASTEXITCODE
@@ -225,7 +229,54 @@ $thumb = (Run-Sched "-Mode unattended -Time 06:30 -Python $python -TenantId $tid
 Check 'thumbprint recorded' ($thumb -like 'C002*')
 
 Write-Host ''
+Write-Host '-- 12. the task does not hold the folder every upgrade replaces'
+# A running program's working directory cannot be renamed or deleted on
+# Windows. This task's was the console folder - the one setup replaces - so a
+# 07:00 refresh that happened to overlap an upgrade would collide with it. The
+# same trap half-deleted a real console folder through the desktop shortcuts,
+# was fixed there twice, and was still live here.
+$r = Run-Sched "-Mode while-signed-in -Time 07:00 -Python $python"
+Check '12 the task runs from the install root' ($r.Task.Action.WorkingDirectory -eq $root)
+Check '12 and NOT from the folder setup replaces' ($r.Task.Action.WorkingDirectory -ne $consoleDir)
+Check '12 every path it needs is passed in full instead' (
+    $r.Task.Action.Argument -like "*-ToolRoot*" -and $r.Task.Action.Argument -like "*-OutputRoot*" -and
+    $r.Task.Action.Argument -like "*-SitePath*")
+
+Write-Host ''
+Write-Host '-- 13. setting a schedule REPLACES the task; it never removes it first'
+# Register-ScheduledTask -Force replaces in place, so removing first bought
+# nothing and carried all the risk - see case 14.
+$r = Run-Sched "-Mode while-signed-in -Time 07:30 -Python $python"
+Check '13 the task is registered, with -Force' (@($r.Log | Where-Object { $_ -like 'register * force=True' }).Count -eq 1)
+Check '13 and nothing was unregistered on the way' (@($r.Log | Where-Object { $_ -like 'unregister *' }).Count -eq 0)
+Check '13 the new time took effect' ($r.Task.Trigger.At -like '*07:30*' -and $r.Ini['schedule.time'] -eq '07:30')
+$r = Run-Sched "-Mode unattended -Time 06:00 -Python $python -TenantId $tid -ClientId $cid" -Graph 'app-ok'
+Check '13 the same on the unattended route' (
+    @($r.Log | Where-Object { $_ -like 'unregister *' }).Count -eq 0 -and $r.Task.Principal.UserId -eq 'SYSTEM')
+# Turning it OFF still removes it - that is the one place removal belongs.
+$r = Run-Sched "-Mode off"
+Check '13 turning it off still removes the task' (
+    @($r.Log | Where-Object { $_ -like 'unregister *' }).Count -eq 1 -and $null -eq $r.Task)
+
+Write-Host ''
+Write-Host '-- 14. THE GAP: a register that fails must not leave the machine with no schedule'
+# Remove-then-create meant that if the remove succeeded and the register then
+# threw, the catch wrote a warning and left NO task - while Write-RefreshIni
+# never ran, so automatic-refresh.ini still said a daily refresh was set up.
+# The console then promised every morning a refresh that could not happen, and
+# nothing anywhere compared the promise with the job that keeps it.
+$null = Run-Sched "-Mode while-signed-in -Time 07:00 -Python $python"
+$r = Run-Sched "-Mode while-signed-in -Time 09:00 -Python $python" -RegFail
+Check '14 it reports the failure' ($r.Code -eq 1 -and $r.Text -like '*Access is denied*')
+Check '14 the schedule that WAS working is still there' ($null -ne $r.Task)
+Check '14 still at its old time, not half-changed' ($r.Task.Trigger.At -like '*07:00*')
+Check '14 and the ini still describes what actually exists' (
+    $r.Ini['schedule.mode'] -eq 'while-signed-in' -and $r.Ini['schedule.time'] -eq '07:00')
+Check '14 nothing was unregistered' (@($r.Log | Where-Object { $_ -like 'unregister *' }).Count -eq 0)
+
+Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+$env:ITOPS_STUB_REG_FAIL = $null
 $env:ITOPS_STUB_GRAPH = $null; $env:ITOPS_STUB_LOG = $null; $env:ITOPS_STUB_TASKS = $null; $env:ITOPS_STUB_CERTS = $null
 if ($fails.Count) { Write-Host "RESULT: $($fails.Count) FAILURES"; $fails | ForEach-Object { Write-Host "  - $_" }; exit 1 }
 Write-Host 'RESULT: ALL PASS'
