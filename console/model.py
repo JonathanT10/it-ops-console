@@ -527,6 +527,20 @@ def refresh_model(feed):
     else:
         note = 'Automatic refresh is off - "Refresh IT Ops Data" on the desktop updates this console.'
 
+    # Being one release behind is not a fault, so this is not a banner: no
+    # warning icon, no amber bar. It is a line of text on the overview saying
+    # what you are on and what exists. Until run-all started asking, nothing in
+    # the suite knew a release had happened at all - the footer showed the
+    # version you were ON and had nothing to compare it with.
+    upd = d.get("Update") or {}
+    update = None
+    if upd.get("Newer") is True and upd.get("Installed") and upd.get("Latest"):
+        update = {
+            "installed": str(upd["Installed"]),
+            "latest": str(upd["Latest"]),
+            "url": str(upd.get("Url") or ""),
+        }
+
     banners = []
     # The schedule says what this computer is SET UP to do. Whether the job
     # that does it still exists is a different question, and until run-all
@@ -596,6 +610,7 @@ def refresh_model(feed):
         "when": when,
         "note": note,
         "banners": banners,
+        "update": update,
     }
 
 

@@ -111,6 +111,24 @@ def _refresh_banners(refresh):
     return "".join(out)
 
 
+def _update_note(refresh):
+    """One line: what you are running, what exists, and where to get it.
+
+    Deliberately NOT a banner. A banner carries a warning icon and an amber
+    bar, and being one release behind is not a fault - dressing it as one
+    teaches people to ignore the bar that means something.
+    """
+    u = (refresh or {}).get("update")
+    if not u:
+        return ""
+    link = ('<a href="%s" rel="noopener noreferrer" target="_blank">%s</a>'
+            % (esc(u["url"]), esc("what is in it"))) if u.get("url") else ""
+    tail = (" - %s. Download it and double-click Setup-IT-Ops-Console.cmd; "
+            "it keeps your settings, your schedule and your data." % link) if link else "."
+    return ('<p class="note">You are running suite v%s. v%s is available%s</p>'
+            % (esc(u["installed"]), esc(u["latest"]), tail))
+
+
 # The overview shows the sharp end of the alert rules: what a person would act
 # on this week. Two caps keep it readable when one rule finds a lot - severity
 # order means a critical is never the thing that gets cut.
@@ -297,8 +315,9 @@ def build_overview(models, feeds, available, generated):
                                 '<span>%s <span class="cat">&mdash; %s</span></span></div>'
                                 % (esc(f.label), esc(f.age), esc(f.path)) for f in stale))
 
-    body = ('%s<div class="tiles">%s</div>%s%s'
-            % (_refresh_banners(models.get("refresh")), "".join(tiles), urgent_html, stale_html))
+    body = ('%s%s<div class="tiles">%s</div>%s%s'
+            % (_refresh_banners(models.get("refresh")), _update_note(models.get("refresh")),
+               "".join(tiles), urgent_html, stale_html))
     return shell("Overview", "index", available, body, generated,
                  subtitle="One card per domain. Open a card for that topic only.")
 
