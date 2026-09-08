@@ -528,14 +528,22 @@ def refresh_model(feed):
         note = 'Automatic refresh is off - "Refresh IT Ops Data" on the desktop updates this console.'
 
     banners = []
-    if d.get("Scheduled") and signin.get("Ok") is False:
+    # A refresh that could not sign in AT ALL leaves every Microsoft 365 number
+    # behind, and that is worth saying whoever started it. It used to be said
+    # only for scheduled runs, so a refresh a person clicked could fail to
+    # sign in and the overview would look exactly like a healthy one.
+    if signin.get("Ok") is False:
+        which = "The last automatic refresh" if d.get("Scheduled") else "The last refresh"
         banners.append({
             "tone": "warning",
-            "text": ("The last automatic refresh (%s) couldn't sign in, so the Microsoft 365 numbers "
+            "text": ("%s (%s) couldn't sign in, so the Microsoft 365 numbers "
                      "are from the run before it. Double-click \"Refresh IT Ops Data\" to sign in and "
-                     "collect them." % when),
+                     "collect them." % (which, when)),
             "detail": signin.get("Detail") or "",
         })
+    # A run that fell back to another sign-in and then WORKED is a different
+    # thing: worth flagging when nobody was watching, noise when a person just
+    # clicked Refresh and got their data. That one stays scheduled-only.
     elif d.get("Scheduled") and signin.get("Dropped"):
         first = str(signin["Dropped"][0]).rstrip(".")
         banners.append({

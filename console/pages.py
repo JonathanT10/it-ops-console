@@ -6,7 +6,7 @@ import json
 
 from . import alerts as alert_rules
 from .actions import CA_GAP_ACTION, next_step  # noqa: F401 - re-exported for callers and tests
-from .render import (ICONS, bar_rows, badge, delta_badge, esc, fmt_metric, freshness_chip,
+from .render import (ICONS, PAGES, bar_rows, badge, delta_badge, esc, fmt_metric, freshness_chip,
                      meter, money, muted_badge, shell, sparkline, status_badge, trend_card)
 
 
@@ -119,12 +119,31 @@ PANEL_PER_RULE = 5
 PANEL_TOTAL = 12
 
 
+# Refresh rules kept OUT of the panel, and why each one:
+#   could_not_sign_in, certificate_expiring_days - already a banner at the top
+#     of this same page; saying it twice is noise.
+#   data_stale_days - age is on every tile's own dot, and anything genuinely
+#     old has the "Stale data" section below. It is also the softest of these
+#     signals, and the panel is capped: letting it take a slot pushes out a
+#     finding that matters more.
+# What is NOT kept out any more: "a collector did not complete". This used to
+# drop the WHOLE refresh tab, so that rule fired correctly and was then
+# filtered out of the one panel that exists to say what needs a person - two
+# sections could fail and the overview said nothing at all.
+PANEL_EXCLUDED_RULES = ("could_not_sign_in", "certificate_expiring_days", "data_stale_days")
+
+# The tabs an alert can carry that are actually built as pages (render.PAGES,
+# minus the overview itself). "refresh" is a tab in the alert catalog and not
+# a page - it is this page's banner and panel.
+BUILT_PAGES = frozenset(k for k, _ in PAGES if k != "index")
+
+
 def _needs_a_human(fired):
     """(rows to show, {rule: how many more of that rule there are})."""
     items = [a for a in (fired or [])
              if a.get("severity") in PANEL_SEVERITIES
              and not a.get("transient")
-             and a.get("tab") != "refresh"]
+             and a.get("rule") not in PANEL_EXCLUDED_RULES]
     kept, extra, seen = [], {}, {}
     for a in items:
         n = seen[a["rule"]] = seen.get(a["rule"], 0) + 1
@@ -158,7 +177,7 @@ def build_overview(models, feeds, available, generated):
                 '<div class="headline">%s</div><div class="sub">%s</div>%s'
                 '<div class="foot"><span class="dot %s"></span>%s</div></a>'
                 % (esc(key), esc(title), extra, esc(headline), esc(sub), trend,
-                   esc(f.state), esc(f.age)))
+                   esc(f.state), esc(f.foot_note)))
 
     trends = models.get("trends") or {}
     sec_trend = trends.get("security") or {}
@@ -237,8 +256,9 @@ def build_overview(models, feeds, available, generated):
     # Anything that needs a human, taken straight from the alert rules so the
     # page and the messages can never disagree about what counts. Left out on
     # purpose: informational findings (they stay on their own page), change
-    # EVENTS (history, not open items), and the refresh's own troubles, which
-    # already have a banner at the top of this page and the stale list below.
+    # EVENTS (history, not open items), and the two refresh rules that already
+    # have a banner at the top of this page. A collector that did not complete
+    # belongs HERE - it used to be dropped with the rest of its tab.
     urgent, extra = _needs_a_human(models.get("fired"))
     urgent_html = ""
     if urgent:
@@ -252,9 +272,14 @@ def build_overview(models, feeds, available, generated):
             nxt = urgent[i + 1]["rule"] if i + 1 < len(urgent) else None
             more = extra.get(a["rule"])
             if more and a["rule"] != nxt:
+                # Not every alert tab is a page. The refresh rules live on this
+                # one, so pointing "+3 more" at refresh.html would be a link to
+                # a file the console never builds.
+                where = ('on the <a href="%s.html">%s page</a>' % (esc(a["tab"]), esc(a["tab_label"]))
+                         if a["tab"] in BUILT_PAGES else "not shown here")
                 rows.append('<div class="chg"><span class="kind">%s</span>'
-                            '<span class="muted">+%d more like this on the <a href="%s.html">%s page</a>'
-                            '</span></div>' % (esc(a["tab_label"]), more, esc(a["tab"]), esc(a["tab_label"])))
+                            '<span class="muted">+%d more like this %s'
+                            '</span></div>' % (esc(a["tab_label"]), more, where))
         note = ('The same things the console would tell you about, from every domain below. '
                 'Change what counts on the <a href="alerts.html">Alerts</a> tab.')
         urgent_html = ('<section><h2>Needs a human</h2>'

@@ -81,7 +81,22 @@ class Feed:
         self.error = error
         self.ts = ts
         self.missing = missing   # configured, but its tool has never written it
+        # Why the last refresh could not update this feed, in the collector's
+        # own words. Empty when the last refresh did update it - or when there
+        # is nothing to say either way.
+        self.stale_reason = ""
         self.state, self.age = freshness(ts)
+
+    def not_updated(self, why=""):
+        """The refresh that just ran failed at the step that writes this feed.
+        Age alone cannot say that: a collector that failed at lunchtime leaves
+        yesterday evening's file sitting there at seventeen hours old, which is
+        inside the 26-hour "fresh" line, so the page showed a green dot and a
+        cheerful "17h ago" on numbers the run had just failed to refresh. What
+        matters is not how old the file is - it is that nothing updated it."""
+        self.stale_reason = why or "the last refresh could not update it"
+        if self.state == "fresh":
+            self.state = "aging"
 
     @property
     def ok(self):
@@ -98,6 +113,17 @@ class Feed:
             return "nothing collected yet"
         if not self.path:
             return "not configured"
+        if self.stale_reason:
+            return "the last refresh could not update this - %s" % self.age
+        return self.age
+
+    @property
+    def foot_note(self):
+        """What the little dot on a tile says. The age, unless the last run
+        failed to update this - then say THAT, because it is the thing a
+        person would act on."""
+        if self.stale_reason:
+            return "not updated by the last refresh - %s" % self.age
         return self.age
 
     @property
@@ -233,6 +259,37 @@ LOADERS = {
 }
 
 
+# Which feeds each collector writes. run-all names its steps in
+# refresh-status.json; this is how a failed STEP becomes a marked FEED.
+STEP_FEEDS = {
+    "entra-tenant-docs":         ("tenant", "run_summary", "history"),
+    "entra-security-snapshot":   ("security", "security_history"),
+    "m365-license-waste-report": ("licensing", "licensing_history"),
+    "print-fleet-collector":     ("fleet", "fleet_discovery"),
+}
+
+
+def mark_not_updated(feeds):
+    """Carry the last refresh's failures onto the feeds they belong to.
+
+    Without this the console had no way to say "this number is old BECAUSE the
+    run failed" - it only knew how old the file was, and a collector that
+    fails at lunchtime leaves a file young enough to look fine."""
+    rs = feeds.get("refresh_status")
+    if rs is None or not rs.ok:
+        return
+    for step in (rs.data or {}).get("Steps") or []:
+        if not isinstance(step, dict):
+            continue
+        if step.get("Status") not in ("FAILED", "missing"):
+            continue
+        why = str(step.get("Detail") or "").strip()
+        for key in STEP_FEEDS.get(str(step.get("Step") or ""), ()):
+            feed = feeds.get(key)
+            if feed is not None and feed.ok:
+                feed.not_updated(why)
+
+
 def _norm(p):
     # Configs written on Windows use backslashes. On POSIX a backslash is an
     # ordinary filename character, so a copied config fails with paths that
@@ -287,4 +344,5 @@ def load_all(config_path):
             feeds[key] = Feed(key, label, path, data=data, ts=ts)
         except Exception as e:  # noqa: BLE001 - one bad feed must not kill the console
             feeds[key] = Feed(key, label, path, error="%s: %s" % (type(e).__name__, e))
+    mark_not_updated(feeds)
     return cfg, feeds
