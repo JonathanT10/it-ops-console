@@ -80,6 +80,9 @@ function Connect-MgGraph {
             $script:ctx = [pscustomobject]@{ Account = $null; ClientId = $ClientId; AuthType = 'AppOnly'; Scopes = @('Directory.Read.All') }
             return
         }
+        if ($modes -contains 'key-fail') {
+            throw 'ClientCertificateCredential authentication failed: Keyset does not exist'
+        }
         throw 'AADSTS700027: Client assertion contains an invalid signature. [Reason - The key was not found.]'
     }
     Add-Content $env:ITOPS_STUB_LOG "connect user scopes=$(@($Scopes).Count)"
@@ -139,7 +142,7 @@ function Get-Item {
 
 function Run-Case {
     param([string]$Graph, [string]$CertNotAfter, [string]$IniText, [switch]$Desktop, [switch]$NoConnect, [switch]$NoKey, [int]$Timeout = 30, [int]$StepTimeout = 0,
-          [string]$UpdateCache)
+          [string]$UpdateCache, [string]$CertMemo)
     if (Test-Path $log) { Remove-Item $log }
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     if (Test-Path $site) { Remove-Item $site -Recurse -Force }
@@ -148,6 +151,7 @@ function Run-Case {
     # how the SUCCESS path is testable at all here: this machine cannot reach
     # GitHub, and a run that asks and is refused is the failure path.
     if ($UpdateCache) { Set-Content (Join-Path $out 'update-check.json') $UpdateCache }
+    if ($CertMemo) { Set-Content (Join-Path $out 'cert-key-unusable.json') $CertMemo }
     if ($IniText) { Set-Content $ini $IniText } elseif (Test-Path $ini) { Remove-Item $ini }
     # earlier cases leave the price-list starter behind; each case starts clean
     Remove-Item (Join-Path $tools 'm365-license-waste-report/prices.ini') -ErrorAction SilentlyContinue
@@ -661,6 +665,67 @@ $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -UpdateCache ('{"Lates
 Check '9m no installed version is recorded' (-not $r.Status.Update.Installed)
 Check '9m and no claim is made either way' ($r.Status.Update.Newer -eq $null)
 Check '9m the overview says nothing about versions' ($r.Index -notlike '*is available*')
+
+Write-Host ''
+Write-Host '-- 9n. a key this account cannot open is learned ONCE, not every run'
+# Twice a pre-flight said the private key was fine and the sign-in then failed
+# with "Keyset does not exist" - asking for a key handle, and even signing with
+# it, is not the question Microsoft's own credential asks. So the answer that
+# counts is the one from a real attempt, and it is written down.
+$memoFile = Join-Path $out 'cert-key-unusable.json'
+$r = Run-Case -Graph 'key-fail' -IniText $iniApp -CertNotAfter $plus700 -Desktop
+Check '9n the first run tries it, and says what happened' (
+    (Count $r.Log 'connect app*') -eq 1 -and $r.Text -like '*not allowed to use*private key*')
+Check '9n the run still works, signed in as the person' (
+    $r.Code -eq 0 -and $r.Status.SignIn.Mode -eq 'user')
+Check '9n and it is written down' (Test-Path $memoFile)
+# Read defensively. A check that CRASHES when the thing under test is missing
+# takes the whole suite with it and hides every check after it - which is
+# exactly what this one did the first time it met a build without the memory.
+$memoRaw = if (Test-Path $memoFile) { Get-Content $memoFile -Raw } else { '' }
+$memo = @()
+if ($memoRaw) { try { $memo = @($memoRaw | ConvertFrom-Json) } catch { $memo = @() } }
+Check '9n against the certificate it actually failed on' (
+    $memo.Count -eq 1 -and "$($memo[0].Thumbprint)" -eq 'ABCDEF0123456789ABCDEF0123456789ABCDEF01')
+Check '9n and against this account, not the machine' (
+    $memo.Count -eq 1 -and "$($memo[0].User)" -and $memo[0].WhenUtc)
+# A thumbprint is public and the reason is the sentence already on screen -
+# but say so out loud, because "we wrote something about a certificate to disk"
+# deserves a check that no key material went with it. (The words "private key"
+# DO appear, in the explanation; what must not is any key material.)
+Check '9n nothing secret is in it' (
+    [bool]$memoRaw -and $memoRaw -notlike '*BEGIN*' -and $memoRaw -notlike '*-----*' -and
+    $memoRaw -notlike '*MII*' -and $memoRaw.Length -lt 2000)
+
+# THE POINT: the next run does not walk into it again. Each case starts with a
+# clean output folder, so what the last run wrote is handed back deliberately -
+# which is also the only way to be sure it is the MEMORY doing the work.
+$keep = $memoRaw
+$r = Run-Case -Graph 'key-fail' -IniText $iniApp -CertNotAfter $plus700 -Desktop -CertMemo $keep
+Check '9n the next run does not try it at all' ((Count $r.Log 'connect app*') -eq 0)
+Check '9n and says why in words, without sounding like a fault' (
+    $r.Text -like '*cannot be opened by your account on this computer*' -and
+    $r.Text -like '*belongs to the scheduled refresh*')
+Check '9n it still signs the person in and works' ($r.Code -eq 0 -and $r.Status.SignIn.Mode -eq 'user')
+Check '9n nothing is reported as a failed rung' (@($r.Status.SignIn.Dropped).Count -eq 0)
+
+# A SCHEDULED run is the certificate's own route. It must always try, and its
+# failure must keep being reported - never quietly skipped because a desk
+# account once could not open the key.
+$r = Run-Case -Graph 'key-fail' -IniText $iniApp -CertNotAfter $plus700 -CertMemo $keep
+Check '9n a scheduled run tries anyway' ((Count $r.Log 'connect app*') -eq 1)
+Check '9n and still reports it' (@($r.Status.SignIn.Dropped)[0] -like '*private key*')
+
+# A NEW certificate is a new question - the memory expires by itself.
+$iniNewCert = $iniApp -replace 'ABCDEF0123456789ABCDEF0123456789ABCDEF01', '99991111999911119999111199991111FFFF0001'
+$r = Run-Case -Graph 'key-fail' -IniText $iniNewCert -CertNotAfter $plus700 -Desktop -CertMemo $keep
+Check '9n a different certificate is tried afresh' ((Count $r.Log 'connect app*') -eq 1)
+
+# And a certificate Microsoft REJECTS is not a key problem: re-running setup
+# with a new one fixes that, so it must keep being tried and reported.
+$r = Run-Case -Graph 'user-ok' -IniText $iniApp -CertNotAfter $plus700 -Desktop
+Check '9n a rejected certificate is not remembered' (
+    (Count $r.Log 'connect app*') -eq 1 -and -not (Test-Path $memoFile))
 
 Write-Host ''
 Write-Host '-- 10. -NoConnect: the session you opened yourself'
