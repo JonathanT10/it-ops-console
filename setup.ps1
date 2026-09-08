@@ -84,20 +84,60 @@ function Ask-YesNo {
     return $v -match '^[Yy]'
 }
 
+function Get-InstalledSuiteVersion {
+    # What is already installed in a folder, from the VERSION a release bundle
+    # leaves beside run-all.ps1. Empty means "nothing installed here" or "an
+    # install that predates VERSION" - both are handled the same way.
+    param([string]$AtRoot)
+    $v = Join-Path (Join-Path (Join-Path $AtRoot 'tools') 'it-ops-console') 'VERSION'
+    if (-not (Test-Path -LiteralPath $v)) { return '' }
+    try { return "$((Get-Content -LiteralPath $v -TotalCount 1))".Trim() } catch { return '' }
+}
+
+# Is there already an install here, and what version is this bundle? Asked
+# BEFORE anything is printed, because an update and a first install should not
+# read like the same event - and because an update must not re-open a decision
+# that was already made. Running the whole interview again to get new files was
+# the thing that made updating feel like a chore worth putting off.
+$installedNow = Get-InstalledSuiteVersion $Root
+$bundleVersionFile = Join-Path $PSScriptRoot 'VERSION'
+$bundleVersion = if (Test-Path -LiteralPath $bundleVersionFile) {
+    "$((Get-Content -LiteralPath $bundleVersionFile -TotalCount 1))".Trim()
+} else { '' }
+$isUpdate = [bool]$installedNow
+
 Write-Host ''
 Write-Host '=== IT Ops Console setup ==============================================' 
 Write-Host ''
-Write-Host 'This will download five small open-source tools, wire them together,'
-Write-Host 'and put two shortcuts on your desktop. Collection against your tenant'
-Write-Host 'is read-only, and you sign in yourself - nothing stores a password.'
-Write-Host ''
-Write-Host 'It asks ONE question now and two at the end. When the window pauses,'
-Write-Host 'it is waiting for you - pressing Enter accepts the suggested answer.'
+if ($isUpdate) {
+    $toTxt = if ($bundleVersion) { " to v$bundleVersion" } else { '' }
+    Write-Host "Found IT Ops Console v$installedNow already installed in $Root."
+    Write-Host "This updates it$toTxt and KEEPS everything you have set up:"
+    Write-Host '  - your automatic-refresh choice and its schedule'
+    Write-Host '  - your alert settings and the places you scan for printers'
+    Write-Host '  - everything already collected'
+    Write-Host ''
+    Write-Host 'It asks ONE question now and one at the end. When the window pauses,'
+    Write-Host 'it is waiting for you - pressing Enter accepts the suggested answer.'
+} else {
+    Write-Host 'This will download five small open-source tools, wire them together,'
+    Write-Host 'and put two shortcuts on your desktop. Collection against your tenant'
+    Write-Host 'is read-only, and you sign in yourself - nothing stores a password.'
+    Write-Host ''
+    Write-Host 'It asks ONE question now and two at the end. When the window pauses,'
+    Write-Host 'it is waiting for you - pressing Enter accepts the suggested answer.'
+}
 Write-Host ''
 
 $Root = Read-Default 'Install folder - press Enter to accept' $Root
+# The folder can be changed at that prompt, so ask again against whatever was
+# actually chosen: pointing an update at an empty folder is a first install,
+# and pointing a first install at an existing one is an update.
+$installedNow = Get-InstalledSuiteVersion $Root
+$isUpdate = [bool]$installedNow
 Write-Host ''
-Write-Host "Setting up in $Root. The rest runs on its own - takes a minute or two."
+if ($isUpdate) { Write-Host "Updating $Root. The rest runs on its own - takes a minute or two." }
+else { Write-Host "Setting up in $Root. The rest runs on its own - takes a minute or two." }
 $tools = Join-Path $Root 'tools'
 $output = Join-Path $Root 'output'
 $site = Join-Path $Root 'console-site'
@@ -585,7 +625,32 @@ Write-Host '--- 6/6 Keeping the console fresh ---'
 # run-all.ps1 and, for answers 2 and 3, one Task Scheduler job. Unattended
 # setups never change this - a schedule is a person's decision.
 $scheduler = Join-Path $consoleDir 'schedule-refresh.ps1'
-if ($Unattended) {
+if ($isUpdate) {
+    # THE POINT OF AN UPDATE. This question is the expensive one - three
+    # answers, and the unattended one walks the certificate and app
+    # registration again. Re-asking it to hand someone new files is how
+    # updating turned into a chore, and answering it differently by accident
+    # is how a working schedule gets changed. So an update does not ask; it
+    # says what is set and how to change it if that is what you actually came
+    # to do.
+    $curIni = Join-Path $consoleDir 'automatic-refresh.ini'
+    $curMode = 'off'; $curTime = ''
+    if (Test-Path -LiteralPath $curIni) {
+        foreach ($l in (Get-Content -LiteralPath $curIni)) {
+            $t = "$l".Trim()
+            if ($t -match '^mode\s*=\s*(.+)$') { $curMode = $matches[1].Trim() }
+            elseif ($t -match '^time\s*=\s*(.+)$') { $curTime = $matches[1].Trim() }
+        }
+    }
+    $said = switch ($curMode) {
+        'while-signed-in' { "every day at $curTime while you are signed in" }
+        'unattended'      { "every day at $curTime, whether or not anyone is signed in" }
+        default           { 'off - you click "Refresh IT Ops Data" yourself' }
+    }
+    Write-Host "  automatic refresh: unchanged - $said"
+    Write-Host '  To change it, right-click schedule-refresh.ps1 in'
+    Write-Host "  $consoleDir and pick Run with PowerShell."
+} elseif ($Unattended) {
     Write-Host '  automatic refresh: left as it is (run setup without -Unattended to choose)'
 } elseif (-not $onWindows) {
     Write-Host '  (not Windows - automatic refresh uses Task Scheduler; skipping)'

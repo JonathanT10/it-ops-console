@@ -118,7 +118,8 @@ function Write-RefreshIni {
        app registration details are kept across mode changes so switching
        unattended -> off -> unattended again never means re-entering them. #>
     param([string]$ModeValue, [string]$TimeValue, [string]$RunAs, [bool]$KeepSignedIn,
-          [string]$Tenant, [string]$Client, [string]$Thumbprint, [string]$Expires)
+          [string]$Tenant, [string]$Client, [string]$Thumbprint, [string]$Expires,
+          [string]$UpdatesValue = 'yes')
     $keepTxt = if ($KeepSignedIn) { 'yes' } else { 'no' }
     $text = @"
 # Written by setup ($(Get-Date -Format yyyy-MM-dd)). Change it by re-running setup, not by hand.
@@ -137,6 +138,13 @@ tenant_id = $Tenant
 client_id = $Client
 certificate_thumbprint = $Thumbprint
 certificate_expires = $Expires
+
+# Every refresh asks GitHub once a day whether a newer release exists, and the
+# console says so if there is one. It is the only thing the refresh talks to
+# that is not Microsoft 365 or your own printers. Set this to no to stop it -
+# nothing else changes, and the console simply stops mentioning updates.
+[updates]
+check = $UpdatesValue
 "@
     $null = New-Item -ItemType Directory -Path (Split-Path $iniPath -Parent) -Force
     Set-Content -Path $iniPath -Value $text -Encoding UTF8
@@ -266,6 +274,10 @@ $curClient   = Get-IniValue $current 'signin' 'client_id'
 $curThumb    = Get-IniValue $current 'signin' 'certificate_thumbprint'
 $curExpires  = Get-IniValue $current 'signin' 'certificate_expires'
 $curKeep     = (Get-IniValue $current 'signin' 'keep_signed_in' 'no') -match '^(yes|true|1)$'
+# This file is rewritten WHOLE every time, so anything not carried across here
+# is silently deleted. Someone who turned the update check off would have had
+# it turned back on the next time they changed their schedule.
+$curUpdates  = Get-IniValue $current 'updates' 'check' 'yes'
 $modeNumber  = @{ 'off' = '1'; 'while-signed-in' = '2'; 'unattended' = '3' }
 $numberMode  = @{ '1' = 'off'; '2' = 'while-signed-in'; '3' = 'unattended' }
 
@@ -326,7 +338,7 @@ try {
                 } catch { Write-Host '  (no saved Microsoft Graph sign-in to close)' }
             }
             Write-RefreshIni -ModeValue 'off' -TimeValue '' -RunAs '' -KeepSignedIn $false `
-                -Tenant $curTenant -Client $curClient -Thumbprint $curThumb -Expires $curExpires
+                -Tenant $curTenant -Client $curClient -Thumbprint $curThumb -Expires $curExpires -UpdatesValue $curUpdates
             if ($removed) { Write-Host '  removed the daily refresh task.' }
             Write-Host '  Automatic refresh is OFF. "Refresh IT Ops Data" on your desktop is the routine,'
             Write-Host '  and every run signs out of Microsoft 365 when it finishes.'
@@ -342,7 +354,7 @@ try {
             # one. Replacing in place cannot leave that gap.
             New-RefreshTask -RunAs $me -TimeValue $Time -PythonForTask $Python
             Write-RefreshIni -ModeValue 'while-signed-in' -TimeValue $Time -RunAs $me -KeepSignedIn $true `
-                -Tenant $curTenant -Client $curClient -Thumbprint $curThumb -Expires $curExpires
+                -Tenant $curTenant -Client $curClient -Thumbprint $curThumb -Expires $curExpires -UpdatesValue $curUpdates
             Write-Host "  Every day at $Time, while you are signed in to this computer, the console"
             Write-Host '  refreshes on its own (if the computer was asleep, it runs when it wakes).'
             Write-Host '  It STAYS SIGNED IN to Microsoft 365 (read-only) between refreshes, so it'
@@ -440,7 +452,7 @@ try {
                     default { "The app sign-in did not work: $why" }
                 }
                 Write-RefreshIni -ModeValue $curMode -TimeValue $curTime -RunAs $curRunAs -KeepSignedIn $curKeep `
-                    -Tenant $t -Client $c -Thumbprint $thumb -Expires $expires
+                    -Tenant $t -Client $c -Thumbprint $thumb -Expires $expires -UpdatesValue $curUpdates
                 throw "$plain Nothing was scheduled; your entries were kept, so re-run setup and try again once that is fixed."
             }
             Write-Host "  it works: signed in as the app and read '$orgName'."
@@ -468,7 +480,7 @@ try {
             # believes it refreshes itself overnight and does not.
             New-RefreshTask -RunAs 'SYSTEM' -TimeValue $Time -PythonForTask $pyExe
             Write-RefreshIni -ModeValue 'unattended' -TimeValue $Time -RunAs 'SYSTEM' -KeepSignedIn $false `
-                -Tenant $t -Client $c -Thumbprint $thumb -Expires $expires
+                -Tenant $t -Client $c -Thumbprint $thumb -Expires $expires -UpdatesValue $curUpdates
             Write-Host ''
             Write-Host "  Every day at $Time, whether or not anyone is signed in, this computer refreshes"
             Write-Host '  the console as the app you registered (read-only). No password is stored anywhere;'

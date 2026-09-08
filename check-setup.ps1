@@ -60,6 +60,16 @@ if (Test-Path (Join-Path (Join-Path $tools 'it-ops-console') 'sources.ini')) { S
 else { Gap 'sources.ini is missing - re-run setup to rewrite it' }
 if (Test-Path (Join-Path (Join-Path $tools 'it-ops-console') 'serve-console.py')) { Say 'serve-console.py (what the console icon starts)' }
 else { Gap 'serve-console.py is missing - the console icon cannot start the console; re-run setup from a current release bundle' }
+# Which version this is. The answer to "am I on the newest one?" comes from the
+# last refresh, which already asked - this makes no second call of its own.
+$verFile = Join-Path (Join-Path $tools 'it-ops-console') 'VERSION'
+if (Test-Path $verFile) {
+    $installedVer = "$((Get-Content $verFile -TotalCount 1))".Trim()
+    Say "suite version: v$installedVer"
+} else {
+    $installedVer = ''
+    Note 'no VERSION file - this install did not come from a release bundle, so nothing can tell you when a newer one exists'
+}
 # An update renames the old tool folder aside and deletes it afterwards. If
 # something was still holding it, that copy is left behind on purpose - better a
 # folder you can delete than an update that failed. Say what it is so nobody
@@ -228,6 +238,15 @@ if (Test-Path $rsPath) {
         } else {
             if ($rs.SignIn -and @($rs.SignIn.Dropped).Count) { Note "the last $kind had to fall back: $(@($rs.SignIn.Dropped)[0])" }
             Say "last $kind ($($rs.GeneratedUtc)): $(if ($rs.Ok) { 'everything ran' } else { 'some steps had problems - see the console overview' })"
+        }
+        if ($rs.Update) {
+            if ($rs.Update.Newer -eq $true) {
+                Note "a newer release is available: you are on v$($rs.Update.Installed), v$($rs.Update.Latest) is out - $($rs.Update.Url)"
+            } elseif ($rs.Update.Newer -eq $false) {
+                Say "suite is up to date (v$($rs.Update.Installed), checked $($rs.Update.CheckedUtc))"
+            } elseif ($rs.Update.Installed) {
+                Note 'could not tell whether a newer release exists - no answer from GitHub, or [updates] check = no in automatic-refresh.ini'
+            }
         }
     } catch { Note "could not read $rsPath ($($_.Exception.Message))" }
 }

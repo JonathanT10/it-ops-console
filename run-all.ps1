@@ -850,6 +850,118 @@ function Get-CertSignInWords {
     return "$plain ($($Message.Trim()))"
 }
 
+# Where "is there a newer one?" is answered. The releases page is what a person
+# is sent to; the API is what the check reads.
+$UPDATE_API  = 'https://api.github.com/repos/JonathanT10/it-ops-console/releases/latest'
+$UPDATE_PAGE = 'https://github.com/JonathanT10/it-ops-console/releases/latest'
+$UPDATE_CACHE_HOURS = 24
+
+function Get-SuiteVersion {
+    <# The version THIS install is, from the VERSION file a release bundle
+       ships beside run-all.ps1. A working copy cloned from main has none, and
+       that is a real answer: no version, so nothing to compare. #>
+    param([string]$Dir)
+    $p = Join-Path $Dir 'VERSION'
+    if (-not (Test-Path -LiteralPath $p)) { return '' }
+    try { return "$((Get-Content -LiteralPath $p -TotalCount 1))".Trim() } catch { return '' }
+}
+
+function Compare-SuiteVersion {
+    <# -1 when A is older than B, 0 same, 1 newer, $null when either one is not
+       a plain dotted number. Guessing at a version string nobody planned for
+       is how a console starts announcing updates that do not exist. #>
+    param([string]$Left, [string]$Right)
+    # NOT $a and $b for the split parts. PowerShell variable names are
+    # case-insensitive, so $a inside a function whose parameter is [string]$A
+    # IS that parameter - and assigning an array to a [string]-typed variable
+    # silently COERCES it, so @(1,6,8) became the string "1 6 8", .Count became
+    # 1, and every comparison came back "same version". Caught by running the
+    # thing rather than reading it.
+    $lx = "$Left".TrimStart('v', 'V').Trim()
+    $rx = "$Right".TrimStart('v', 'V').Trim()
+    if (-not $lx -or -not $rx) { return $null }
+    if ($lx -notmatch '^\d+(\.\d+)*$' -or $rx -notmatch '^\d+(\.\d+)*$') { return $null }
+    $lp = @($lx -split '\.' | ForEach-Object { [int]$_ })
+    $rp = @($rx -split '\.' | ForEach-Object { [int]$_ })
+    $n = [math]::Max($lp.Count, $rp.Count)
+    for ($i = 0; $i -lt $n; $i++) {
+        $x = if ($i -lt $lp.Count) { $lp[$i] } else { 0 }
+        $y = if ($i -lt $rp.Count) { $rp[$i] } else { 0 }
+        if ($x -lt $y) { return -1 }
+        if ($x -gt $y) { return 1 }
+    }
+    return 0
+}
+
+function Get-UpdateState {
+    <# Which version this is, which is newest, and whether that is newer.
+
+       Nothing in this suite ever knew a new release existed. The console
+       showed the version you were ON and had nothing to compare it with, so
+       the only way to find out was for someone to tell you.
+
+       Three rules this follows, in order of importance:
+         1. It is the only thing here that talks to anywhere but Microsoft and
+            your printers, so it can be turned off - [updates] check = no.
+         2. It fails silent. No network, blocked egress, a rate limit, an
+            answer that is not a plain version: Latest stays empty and the
+            console says nothing. A machine that cannot ask must never be told
+            it is out of date, which is the same rule the schedule check has.
+         3. It asks at most once a day. The answer is cached beside the data,
+            so a refresh every hour does not mean GitHub every hour - and a
+            check that fails keeps yesterday's answer rather than losing it. #>
+    param([string]$Installed, [string]$CachePath, [bool]$Allowed, [int]$TimeoutSeconds = 5)
+    $state = [ordered]@{ Installed = $Installed; Latest = ''; Newer = $null; Url = $UPDATE_PAGE; CheckedUtc = '' }
+    if (-not $Allowed -or -not $Installed) { return $state }
+
+    $cached = $null
+    if ($CachePath -and (Test-Path -LiteralPath $CachePath)) {
+        try { $cached = Get-Content -LiteralPath $CachePath -Raw | ConvertFrom-Json } catch { $cached = $null }
+    }
+    $fresh = $false
+    if ($cached -and $cached.CheckedUtc) {
+        try {
+            $age = ((Get-Date).ToUniversalTime() - [datetime]::Parse($cached.CheckedUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal)).TotalHours
+            $fresh = ($age -ge 0 -and $age -lt $UPDATE_CACHE_HOURS)
+        } catch { $fresh = $false }
+    }
+    if ($cached -and $cached.Latest) {
+        $state.Latest = "$($cached.Latest)"
+        $state.CheckedUtc = "$($cached.CheckedUtc)"
+        if ($cached.Url) { $state.Url = "$($cached.Url)" }
+    }
+    if (-not $fresh) {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
+        } catch { }
+        try {
+            $headers = @{ 'User-Agent' = 'it-ops-console'; 'Accept' = 'application/vnd.github+json' }
+            $resp = Invoke-RestMethod -Uri $UPDATE_API -Headers $headers -TimeoutSec $TimeoutSeconds -UseBasicParsing -ErrorAction Stop
+            $tag = "$($resp.tag_name)".Trim()
+            if ($tag) {
+                $state.Latest = $tag
+                $state.CheckedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                if ("$($resp.html_url)".Trim()) { $state.Url = "$($resp.html_url)".Trim() }
+                if ($CachePath) {
+                    try {
+                        # The output folder is created later in this script, so
+                        # on a very first run it is not there yet - without this
+                        # the answer could never be cached and every run asked.
+                        $null = New-Item -ItemType Directory -Path (Split-Path $CachePath -Parent) -Force
+                        [ordered]@{ Latest = $state.Latest; Url = $state.Url; CheckedUtc = $state.CheckedUtc } |
+                            ConvertTo-Json | Set-Content -Path $CachePath -Encoding UTF8
+                    } catch { }
+                }
+            }
+        } catch { }      # silence is the answer - see rule 2
+    }
+    if ($state.Latest) {
+        $cmp = Compare-SuiteVersion $Installed $state.Latest
+        if ($null -ne $cmp) { $state.Newer = ($cmp -lt 0) }
+    }
+    return $state
+}
+
 function Test-RefreshTaskPresent {
     <# Is the daily refresh job actually IN Task Scheduler?
 
@@ -921,6 +1033,11 @@ $schedRunAs   = Get-IniValue $refreshIni 'schedule' 'run_as'
 # name it has always used, for an ini written before that key existed.
 $schedTask    = Get-IniValue $refreshIni 'schedule' 'task' 'IT Ops Console - automatic refresh'
 $script:TaskPresent = if ($schedMode -eq 'off') { $null } else { Test-RefreshTaskPresent $schedTask }
+# The only outbound call in this script that is not Microsoft 365 or a printer.
+# Off with [updates] check = no; silent when it cannot be made.
+$updatesOn    = (Get-IniValue $refreshIni 'updates' 'check' 'yes') -match '^(yes|true|1)$'
+$script:Update = Get-UpdateState -Installed (Get-SuiteVersion $PSScriptRoot) `
+                                 -CachePath (Join-Path $OutputRoot 'update-check.json') -Allowed $updatesOn
 # Staying signed in between runs is a choice a person made in setup, and only
 # for the "while I'm signed in" schedule. Anything else signs out at the end,
 # exactly as before.
@@ -1192,6 +1309,7 @@ function Write-RefreshStatus {
         Steps        = @($results.ToArray() | ForEach-Object { [ordered]@{ Step = $_.Step; Status = $_.Status; Detail = $_.Detail } })
         Schedule     = [ordered]@{ Mode = $schedMode; Time = $schedTime; RunAs = $schedRunAs
                                    Task = $schedTask; TaskPresent = $script:TaskPresent }
+        Update       = $script:Update
         KeepSignedIn = [bool]$keepSignedIn
         Certificate  = $null
     }
