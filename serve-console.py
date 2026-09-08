@@ -48,6 +48,20 @@ MAX_BODY = 256 * 1024          # a settings block is a few hundred bytes
 # watching. It is deliberately generous: a real refresh of a 200-user tenant
 # takes minutes, not tens of minutes, so anything past this is stuck.
 RUN_DEADLINE_MINUTES = 45
+# One address, the same one every time.
+#
+# This used to ask the operating system for any free port, which meant the
+# console lived somewhere different on every launch. You could not bookmark
+# it, the address in your history was wrong by the next morning, and "where is
+# my console?" had no answer except "look at the window that started it".
+#
+# So there is a usual address. If something else already holds it the next few
+# are tried in order, and only if all of them are taken does it fall back to
+# any free port - starting always beats insisting on a number. Whatever it
+# lands on is printed, written to console-server.json for check-setup, and
+# found again by the icon so a second double-click opens the console you have.
+DEFAULT_PORT = 7373
+PORT_LADDER = 10
 STOPPED_WORDS = ('The refresh was stopped after {0} minutes because it had not finished. '
                  'The usual cause is a Microsoft sign-in window waiting behind another '
                  'window - bring it to the front and finish it, then start the refresh again.')
@@ -82,30 +96,68 @@ def stamp_path(output_root):
     return os.path.join(output_root, "console-server.json") if os.path.isdir(output_root) else None
 
 
-def already_serving(stamp):
+def _is_our_console(port):
+    """True when the thing answering on that port is this console. Anything
+    else on the machine may hold a port; only ours answers the ping."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:%d/api/ping" % port, timeout=2) as r:
+            return json.loads(r.read().decode("utf-8", "replace")).get("itops") is True
+    except Exception:
+        return False
+
+
+def already_serving(stamp, ports=()):
     """The address of a console already running here, or None.
 
     Double-clicking the icon twice should open the console you have, not start
     a second one: two servers means two refreshes can run at once, which is the
     exact thing the one-at-a-time lock exists to prevent. A stale note from a
-    window that has since been closed answers nothing, so it is ignored."""
-    if not stamp or not os.path.isfile(stamp):
-        return None
-    try:
-        with open(stamp, "r", encoding="utf-8") as fh:
-            port = int(json.load(fh).get("port") or 0)
-    except (OSError, ValueError, TypeError):
-        return None
-    if not port:
-        return None
-    try:
-        import urllib.request
-        with urllib.request.urlopen("http://127.0.0.1:%d/api/ping" % port, timeout=2) as r:
-            if json.loads(r.read().decode("utf-8", "replace")).get("itops") is True:
-                return "http://127.0.0.1:%d/" % port
-    except Exception:
-        return None
+    window that has since been closed answers nothing, so it is ignored.
+
+    The note is asked first because it is exact. If it says nothing - deleted,
+    unreadable, or written by an install pointed somewhere else - the usual
+    addresses are asked directly, which is the point of having usual addresses
+    at all. A port nothing is listening on refuses instantly, so this costs
+    nothing in the ordinary case."""
+    port = 0
+    if stamp and os.path.isfile(stamp):
+        try:
+            with open(stamp, "r", encoding="utf-8") as fh:
+                port = int(json.load(fh).get("port") or 0)
+        except (OSError, ValueError, TypeError):
+            port = 0
+    if port and _is_our_console(port):
+        return "http://127.0.0.1:%d/" % port
+    for p in ports:
+        if p and p != port and _is_our_console(p):
+            return "http://127.0.0.1:%d/" % p
     return None
+
+
+class ConsoleServer(ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second server bind a port another one is
+    # actively listening on - two consoles, connections landing on whichever,
+    # and the one-refresh-at-a-time lock quietly meaningless. Off there; on
+    # everywhere else, where it only means "do not refuse over TIME_WAIT".
+    allow_reuse_address = (os.name != "nt")
+
+
+def bind_console(wanted, handler):
+    """(server, port). The wanted port, else the next few, else any free one.
+
+    Refusing to start because a number is taken would be the wrong trade: the
+    address is a convenience, having a console at all is not."""
+    tried = []
+    if wanted:
+        tried = [wanted + i for i in range(PORT_LADDER)]
+    for port in tried:
+        try:
+            return ConsoleServer(("127.0.0.1", port), handler), port
+        except OSError:
+            continue
+    httpd = ConsoleServer(("127.0.0.1", 0), handler)
+    return httpd, httpd.server_address[1]
 
 
 class Runner:
@@ -357,7 +409,8 @@ def main(argv=None):
     ap.add_argument("--output-root", default=None)
     ap.add_argument("--python", default=None)
     ap.add_argument("--powershell", default=None, help="PowerShell to run the refresh with")
-    ap.add_argument("--port", type=int, default=0, help="0 = pick a free one")
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT,
+                    help="the usual address (default %d); 0 = any free one" % DEFAULT_PORT)
     ap.add_argument("--run-deadline-minutes", type=int, default=RUN_DEADLINE_MINUTES,
                     help="stop a refresh that has not finished by then (minimum 5)")
     ap.add_argument("--open", action="store_true", help="open a browser at it")
@@ -373,7 +426,8 @@ def main(argv=None):
     tool_root = os.path.abspath(args.tool_root or os.path.dirname(HERE))
     output_root = os.path.abspath(args.output_root or os.path.join(os.path.dirname(tool_root), "output"))
     stamp = stamp_path(output_root)
-    running = already_serving(stamp)
+    ladder = [args.port + i for i in range(PORT_LADDER)] if args.port else []
+    running = already_serving(stamp, ladder)
     if running:
         print("")
         print("Your console is already running at %s" % running)
@@ -390,9 +444,9 @@ def main(argv=None):
     runner.deadline_seconds = max(5, args.run_deadline_minutes) * 60
 
     # 127.0.0.1, never 0.0.0.0: this is for the person sitting here.
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(site, key, runner))
-    port = httpd.server_address[1]
+    httpd, port = bind_console(args.port, make_handler(site, key, runner))
     url = "http://127.0.0.1:%d/" % port
+    moved = bool(args.port) and port != args.port
     if stamp:
         try:
             with open(stamp, "w", encoding="utf-8") as fh:
@@ -405,6 +459,14 @@ def main(argv=None):
     print("")
     print("  Your console is open at:")
     print("    %s" % url)
+    print("")
+    if moved:
+        print("  That is not the usual address - something else on this computer")
+        print("  is already using http://127.0.0.1:%d/. Nothing is wrong; this" % args.port)
+        print("  console just moved along one. If you have the usual address")
+        print("  bookmarked, use the one above this time.")
+    else:
+        print("  It is the same address every time, so it is worth a bookmark.")
     print("")
     print("  This window is what serves it. Leave it open while you use the")
     print("  console; close it when you are done. Nothing else on your network")

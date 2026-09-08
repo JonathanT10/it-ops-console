@@ -65,11 +65,14 @@ puts two shortcuts on your desktop, asks how the console should stay fresh,
 and offers to run the first collection:
 
   IT Ops Console        starts the console on this computer and opens it in
-                        your browser. Everything you do is in there: a
-                        "Refresh now" button at the top, and an "Apply
-                        settings" button on the Alerts and Print fleet tabs.
-                        Leave its little window open while you use it; close
-                        it when you are done
+                        your browser, at http://127.0.0.1:7373/ - the same
+                        address every time, so you can bookmark it. (If
+                        something else on your computer is already using that
+                        address it moves along one and says so.) Everything
+                        you do is in there: a "Refresh now" button at the top,
+                        and an "Apply settings" button on the Alerts and Print
+                        fleet tabs. Leave its little window open while you use
+                        it; close it when you are done
   Refresh IT Ops Data   the same refresh without opening the console first -
                         collects from Microsoft 365 (you sign in, read-only)
                         and rebuilds your console, with live progress
