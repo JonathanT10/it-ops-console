@@ -42,7 +42,7 @@ function Check { param([string]$Label, [bool]$Cond)
 # what people actually run.
 $setup = Join-Path $repo 'setup.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($setup, [ref]$null, [ref]$null)
-$wanted = @('Get-BundleFileList', 'Get-HeldFile', 'Copy-BundleOverTop', 'Install-FromBundle')
+$wanted = @('Get-BundleFileList', 'Get-HeldFile', 'Copy-BundleOverTop', 'Install-FromBundle', 'Get-InstalledSuiteVersion')
 $defs = @{}
 foreach ($f in $ast.FindAll({ param($n)
     $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
@@ -53,8 +53,8 @@ foreach ($name in $wanted) {
     . ([scriptblock]::Create($defs[$name]))
 }
 Check 'the functions come from the shipped setup.ps1' (
-    @('Get-BundleFileList','Get-HeldFile','Copy-BundleOverTop','Install-FromBundle' |
-      Where-Object { Get-Command $_ -ErrorAction SilentlyContinue }).Count -eq 4)
+    @('Get-BundleFileList','Get-HeldFile','Copy-BundleOverTop','Install-FromBundle','Get-InstalledSuiteVersion' |
+      Where-Object { Get-Command $_ -ErrorAction SilentlyContinue }).Count -eq 5)
 
 function New-Bundle {
     # what a release bundle carries for one tool: code and *.example.ini only
@@ -367,6 +367,52 @@ Check 'your settings are still there' ((Get-Content (Join-Path $dest 'alerts.ini
 Check 'and were copied somewhere you can find' (
     Test-Path (Join-Path (Join-Path $root '.settings-backup') 'demo/alerts.ini'))
 $global:LockedName = $null
+
+Write-Host ''
+Write-Host '-- an update has to know it IS one'
+# Updating used to mean the whole interview again, including the expensive
+# question about how the console stays fresh - three answers, and the
+# unattended one walks the certificate and app registration a second time.
+# Being asked that to receive new files is what made updating a chore, and
+# answering it differently by accident is how a working schedule gets changed.
+$vRoot = Join-Path $work 'ver'
+$vConsole = Join-Path (Join-Path $vRoot 'tools') 'it-ops-console'
+$null = New-Item -ItemType Directory -Path $vConsole -Force
+Check 'a folder with no install reads as no install' (-not (Get-InstalledSuiteVersion $vRoot))
+Set-Content (Join-Path $vConsole 'VERSION') "1.6.8`nassembled 2026-09-08 from the repos' main branches"
+Check 'an installed version is read from the first line only' ((Get-InstalledSuiteVersion $vRoot) -eq '1.6.8')
+Set-Content (Join-Path $vConsole 'VERSION') "  1.7.0  "
+Check 'and trimmed' ((Get-InstalledSuiteVersion $vRoot) -eq '1.7.0')
+Check 'a folder that does not exist at all is not an error' (
+    -not (Get-InstalledSuiteVersion (Join-Path $work 'nowhere-at-all')))
+
+# STRUCTURAL, and deliberately labelled as such: this proves the update branch
+# exists and does not call the scheduler. It does not prove the branch is
+# REACHED - running setup end to end would install Graph modules and Python,
+# which does not belong in a unit suite. The same honesty as the locked-folder
+# limit at the top of this file.
+# There are two `if ($isUpdate)` blocks - the one that greets you differently
+# and the one that skips the schedule question. Picking by position would pass
+# on whichever came first; pick the one that is actually about the schedule.
+$updateIfs = @($ast.FindAll({ param($n)
+    $n -is [System.Management.Automation.Language.IfStatementAst] -and
+    $n.Clauses.Count -and "$($n.Clauses[0].Item1.Extent.Text)" -eq '$isUpdate' }, $true))
+Check 'setup.ps1 tells an update from a first install' ($updateIfs.Count -ge 1)
+# Three places: the greeting, the line after the folder prompt (the folder can
+# be changed there, so it is asked again against what was actually chosen), and
+# the schedule step.
+Check 'and does it everywhere it matters - greeting, folder, schedule step' (
+    $updateIfs.Count -eq 3)
+$schedIf = @($updateIfs | Where-Object { "$($_.Clauses[0].Item2.Extent.Text)" -like '*automatic refresh*' })
+Check 'the schedule step is one of them' ($schedIf.Count -eq 1)
+$updateBranchText = if ($schedIf.Count) { "$($schedIf[0].Clauses[0].Item2.Extent.Text)" } else { '' }
+Check 'the update branch does not run the schedule question' (
+    [bool]$updateBranchText -and $updateBranchText -notlike '*$scheduler*')
+Check 'it says the schedule was left alone' ($updateBranchText -like '*automatic refresh: unchanged*')
+Check 'and how to change it if that is what you came for' (
+    $updateBranchText -like '*schedule-refresh.ps1*' -and $updateBranchText -like '*Run with PowerShell*')
+Check 'a first install still asks the question' (
+    (Get-Content $setup -Raw) -like '*& $scheduler @schedArgs*')
 
 Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue

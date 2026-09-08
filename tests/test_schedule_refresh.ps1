@@ -275,6 +275,26 @@ Check '14 and the ini still describes what actually exists' (
 Check '14 nothing was unregistered' (@($r.Log | Where-Object { $_ -like 'unregister *' }).Count -eq 0)
 
 Write-Host ''
+Write-Host '-- 15. a setting this script does not own is not destroyed by rewriting the file'
+# automatic-refresh.ini is rewritten WHOLE on every schedule change, so anything
+# not deliberately carried across is silently deleted. Someone who turned the
+# update check off would have had it turned back on the next time they changed
+# their schedule, and never been told.
+$null = Run-Sched "-Mode while-signed-in -Time 07:00 -Python $python"
+Add-Content $ini "`n[updates]`ncheck = no"
+$r = Run-Sched "-Mode while-signed-in -Time 08:00 -Python $python"
+Check '15 the update-check choice survives a schedule change' ($r.Ini['updates.check'] -eq 'no')
+Check '15 and the schedule change still took' ($r.Ini['schedule.time'] -eq '08:00')
+$r = Run-Sched "-Mode off"
+Check '15 it survives being turned off too' ($r.Ini['updates.check'] -eq 'no')
+# and a file that never said anything gets the default, which is on
+Remove-Item $ini -Force -ErrorAction SilentlyContinue
+$r = Run-Sched "-Mode while-signed-in -Time 07:00 -Python $python"
+Check '15 a file that never said anything defaults to yes' ($r.Ini['updates.check'] -eq 'yes')
+Check '15 and the section is written, so it can be found and changed' (
+    (Get-Content $ini -Raw) -like '*[[]updates[]]*' -and (Get-Content $ini -Raw) -like '*Set this to no to stop it*')
+
+Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 $env:ITOPS_STUB_REG_FAIL = $null
 $env:ITOPS_STUB_GRAPH = $null; $env:ITOPS_STUB_LOG = $null; $env:ITOPS_STUB_TASKS = $null; $env:ITOPS_STUB_CERTS = $null

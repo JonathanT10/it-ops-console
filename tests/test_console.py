@@ -865,6 +865,34 @@ def test_refresh_model():
           any("not in Task Scheduler" in b["text"]
               for b in sched(mode="while-signed-in", present=False)["banners"]))
 
+    # Nothing in the suite ever knew a release had happened: the footer showed
+    # the version you were ON and had nothing to compare it with, so the only
+    # way to find out was for someone to tell you.
+    def upd(**over):
+        u = {"Installed": "1.6.8", "Latest": "v1.7.0", "Newer": True,
+             "Url": "https://example.invalid/releases/latest", "CheckedUtc": "2026-09-08T15:00:00Z"}
+        u.update(over)
+        return model.refresh_model(_refresh_feed(Update=u))
+
+    newer = upd()
+    check("update: a newer release is reported", bool(newer["update"]))
+    # Guarded, so a regression FAILS instead of raising and hiding every check
+    # after it - the same mistake this suite already made once.
+    u = newer["update"] or {}
+    check("update: with both versions, so you can see the gap",
+          u.get("installed") == "1.6.8" and u.get("latest") == "v1.7.0")
+    check("update: and somewhere to go for it",
+          u.get("url") == "https://example.invalid/releases/latest")
+    # Being one release behind is not a fault. It must not become a banner -
+    # dressing it as one teaches people to ignore the bar that means something.
+    check("update: it is NOT a banner", newer["banners"] == [])
+    check("update: up to date says nothing", upd(Newer=False)["update"] is None)
+    check("update: 'could not tell' says nothing", upd(Newer=None)["update"] is None)
+    check("update: a newer release with no version to compare says nothing",
+          upd(Installed="")["update"] is None and upd(Latest="")["update"] is None)
+    check("update: a run that never recorded it says nothing",
+          model.refresh_model(_refresh_feed())["update"] is None)
+
     dropped = model.refresh_model(_refresh_feed(SignIn={
         "Mode": "user", "Ok": True, "Detail": "Signed in with read-only access",
         "Dropped": ["Signing in as the registered app failed: AADSTS700027 bad key."]}))
@@ -1193,6 +1221,28 @@ def test_overview_panel():
           "m365-license-waste-report did not complete" not in broke_chunk)
     check("panel: nothing links to a refresh page, because there is no refresh page",
           'href="refresh.html"' not in broke_html)
+
+    # The update line, on the page rather than in the model.
+    up = dict(models)
+    up["refresh"] = model.refresh_model(_refresh_feed(Update={
+        "Installed": "1.6.8", "Latest": "v1.7.0", "Newer": True,
+        "Url": "https://example.invalid/rel", "CheckedUtc": "2026-09-08T15:00:00Z"}))
+    up["fired"] = A.evaluate(cfg, up, feeds, now=now)
+    up_html = pages.build_overview(up, feeds, avail, "now")
+    check("update: the overview says which version you are on and what exists",
+          "You are running suite v1.6.8" in up_html and "v1.7.0 is available" in up_html)
+    check("update: and links to it", 'href="https://example.invalid/rel"' in up_html)
+    check("update: it tells you the update keeps your settings",
+          "keeps your settings" in up_html)
+    after = up_html.split("You are running suite")
+    check("update: it is not dressed as a problem",
+          len(after) == 2 and 'class="banner' not in after[1][:400])
+    same = dict(models)
+    same["refresh"] = model.refresh_model(_refresh_feed(Update={
+        "Installed": "1.6.8", "Latest": "v1.6.8", "Newer": False, "Url": "", "CheckedUtc": ""}))
+    same["fired"] = A.evaluate(cfg, same, feeds, now=now)
+    check("update: an up-to-date console says nothing about versions",
+          "is available" not in pages.build_overview(same, feeds, avail, "now"))
 
     # turning a rule off takes it off the front page too - the whole point
     off = A.load_config(os.path.join(here, "alerts.example.ini"))

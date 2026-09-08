@@ -138,11 +138,16 @@ function Get-Item {
 '@
 
 function Run-Case {
-    param([string]$Graph, [string]$CertNotAfter, [string]$IniText, [switch]$Desktop, [switch]$NoConnect, [switch]$NoKey, [int]$Timeout = 30, [int]$StepTimeout = 0)
+    param([string]$Graph, [string]$CertNotAfter, [string]$IniText, [switch]$Desktop, [switch]$NoConnect, [switch]$NoKey, [int]$Timeout = 30, [int]$StepTimeout = 0,
+          [string]$UpdateCache)
     if (Test-Path $log) { Remove-Item $log }
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     if (Test-Path $site) { Remove-Item $site -Recurse -Force }
     $null = New-Item -ItemType Directory -Path $out, $site -Force
+    # The update check caches its answer beside the data. Seeding that cache is
+    # how the SUCCESS path is testable at all here: this machine cannot reach
+    # GitHub, and a run that asks and is refused is the failure path.
+    if ($UpdateCache) { Set-Content (Join-Path $out 'update-check.json') $UpdateCache }
     if ($IniText) { Set-Content $ini $IniText } elseif (Test-Path $ini) { Remove-Item $ini }
     # earlier cases leave the price-list starter behind; each case starts clean
     Remove-Item (Join-Path $tools 'm365-license-waste-report/prices.ini') -ErrorAction SilentlyContinue
@@ -593,6 +598,69 @@ try {
 } finally {
     Set-Content $boom2 $boom2Keep
 }
+
+Write-Host ''
+Write-Host '-- 9l. the run works out whether a newer release exists, and can be told not to'
+# Nothing in this suite ever knew a release had happened. The console showed
+# the version you were ON and had nothing to compare it against, so the only
+# way to find out was for someone to tell you.
+#
+# THE VERSION FILE: run-all reads it from beside itself, which in this suite is
+# the repo. Created here and removed again, and never touched if one is already
+# there - a working copy that has one is not a test's to overwrite.
+$verFile = Join-Path $repo 'VERSION'
+$hadVer = Test-Path $verFile
+if (-not $hadVer) { Set-Content $verFile "1.6.8`nassembled by the test suite" }
+$freshStamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+try {
+    # v1.7.0, not v9.9.9. A version that differs in its FIRST character is
+    # compared correctly even by a broken comparison - proven: this case passed
+    # against a copy carrying the exact bug this code was written with. An
+    # adjacent version is the one that tells the difference.
+    $newer = '{"Latest":"v1.7.0","Url":"https://example.invalid/rel","CheckedUtc":"' + $freshStamp + '"}'
+    $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -UpdateCache $newer
+    Check '9l it records which version this install is' ($r.Status.Update.Installed -eq '1.6.8')
+    Check '9l and which one is newest' ($r.Status.Update.Latest -eq 'v1.7.0')
+    Check '9l and that the newest is newer than this one' ($r.Status.Update.Newer -eq $true)
+    Check '9l with somewhere to go for it' ($r.Status.Update.Url -eq 'https://example.invalid/rel')
+    Check '9l the console says so on the overview' (
+        $r.Index -like '*You are running suite v1.6.8*' -and $r.Index -like '*v1.7.0 is available*')
+
+    # Ten is bigger than nine. Comparing version parts as text says otherwise,
+    # and would leave someone on 1.6.8 never told about 1.6.10.
+    $tenth = '{"Latest":"v1.6.10","Url":"https://example.invalid/rel","CheckedUtc":"' + $freshStamp + '"}'
+    $r2 = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -UpdateCache $tenth
+    Check '9l 1.6.10 is newer than 1.6.8, not older' ($r2.Status.Update.Newer -eq $true)
+    Check '9l it is not dressed as a problem' (
+        ([regex]::Matches($r.Index, 'class="banner')).Count -eq 1 -and $r.Index -like '*id="filenote"*')
+
+    # An answer already in hand is used even though this machine cannot reach
+    # GitHub - a check that fails must not lose yesterday's answer.
+    $older = '{"Latest":"v1.6.7","Url":"https://example.invalid/rel","CheckedUtc":"' + $freshStamp + '"}'
+    $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -UpdateCache $older
+    Check '9l an install that is ahead is not told to update' ($r.Status.Update.Newer -eq $false)
+    Check '9l and the overview stays quiet about versions' ($r.Index -notlike '*is available*')
+
+    # Turned off: the one outbound call that is not Microsoft or a printer.
+    $iniNoUpdates = $iniKeep + "`n[updates]`ncheck = no`n"
+    $r = Run-Case -Graph 'user-ok' -IniText $iniNoUpdates -Desktop -UpdateCache $newer
+    Check '9l [updates] check = no stops it entirely' (
+        $r.Status.Update.Newer -eq $null -and -not $r.Status.Update.Latest)
+    Check '9l even with an answer sitting in the cache' ($r.Status.Update.Installed -eq '1.6.8')
+    Check '9l and the overview says nothing' ($r.Index -notlike '*is available*')
+} finally {
+    if (-not $hadVer) { Remove-Item $verFile -Force -ErrorAction SilentlyContinue }
+}
+
+Write-Host ''
+Write-Host '-- 9m. no VERSION file: nothing to compare, so nothing is claimed'
+# A working copy cloned from main has no VERSION. Saying "you are on v" and
+# then nothing, or worse guessing, is how a console starts announcing updates
+# that do not exist.
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -UpdateCache ('{"Latest":"v9.9.9","Url":"x","CheckedUtc":"' + $freshStamp + '"}')
+Check '9m no installed version is recorded' (-not $r.Status.Update.Installed)
+Check '9m and no claim is made either way' ($r.Status.Update.Newer -eq $null)
+Check '9m the overview says nothing about versions' ($r.Index -notlike '*is available*')
 
 Write-Host ''
 Write-Host '-- 10. -NoConnect: the session you opened yourself'
