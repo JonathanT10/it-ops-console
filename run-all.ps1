@@ -788,15 +788,33 @@ function Get-RefreshCertificateInfo {
             $info.KeyUsable = $false
             $info.KeyWhy = 'this copy of it has no private key'
         } elseif ($hasKeyProp) {
-            try {
-                $key = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
-                if ($key) { try { $key.Dispose() } catch { } }
-                else {
+            # Holding a handle to the key is NOT the same as being allowed to
+            # USE it. On Windows the CNG handle comes back happily and the
+            # FIRST real operation is where "Keyset does not exist" appears.
+            # This check said the key was fine on a machine where the sign-in
+            # then failed exactly that way - and because a manual run now
+            # trusts this answer, it reached for the certificate and dropped
+            # the failure in front of the person, which is the thing the whole
+            # arrangement exists to prevent. So the check SIGNS something: a
+            # three-byte buffer, which is the cheapest operation that actually
+            # opens the key.
+            $key = $null
+            $couldAsk = $true
+            try { $key = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert) }
+            catch { $couldAsk = $false }     # cannot tell from here; let the sign-in decide
+            if ($couldAsk -and -not $key) {
+                $info.KeyUsable = $false
+                $info.KeyWhy = 'this account is not allowed to use its private key'
+            } elseif ($key) {
+                try {
+                    $null = $key.SignData([byte[]]@(1, 2, 3),
+                        [Security.Cryptography.HashAlgorithmName]::SHA256,
+                        [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+                } catch {
                     $info.KeyUsable = $false
                     $info.KeyWhy = 'this account is not allowed to use its private key'
                 }
-            } catch {
-                # Could not ask. Leave it usable and let the sign-in decide.
+                try { $key.Dispose() } catch { }
             }
         }
     } else {
