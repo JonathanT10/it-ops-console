@@ -183,6 +183,9 @@ function Get-TaskIfAny {
     try { return Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction Stop } catch { return $null }
 }
 function Remove-TaskIfAny {
+    # Only 'off' uses this now. Setting a schedule REPLACES the task in place
+    # (Register-ScheduledTask -Force); removing first could leave nothing at
+    # all if the register then failed.
     if (Get-TaskIfAny) { Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false -ErrorAction Stop; return $true }
     return $false
 }
@@ -193,7 +196,14 @@ function New-RefreshTask {
     param([string]$RunAs, [string]$TimeValue, [string]$PythonForTask)
     $argText = "-NoProfile -ExecutionPolicy Bypass -File `"$runAll`" -ToolRoot `"$tools`" -OutputRoot `"$output`" -SitePath `"$site`" -Scheduled -NoStatusPage"
     if ($PythonForTask) { $argText += " -Python `"$PythonForTask`"" }
-    $action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argText -WorkingDirectory $consoleDir
+    # NOT the console folder. A running program's working directory cannot be
+    # renamed or deleted on Windows, and this folder is the one setup replaces
+    # on every upgrade - so a refresh that happens to be running when someone
+    # upgrades would collide with it. That trap has already been fixed twice
+    # for the desktop shortcuts and was still live here. Nothing run-all does
+    # needs that folder as its working directory; every path it uses is passed
+    # to it in full.
+    $action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argText -WorkingDirectory $Root
     $trigger  = New-ScheduledTaskTrigger -Daily -At $TimeValue
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
                     -ExecutionTimeLimit (New-TimeSpan -Hours 2) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
@@ -323,7 +333,13 @@ try {
         }
         'while-signed-in' {
             $me = if ($onWindows) { [Security.Principal.WindowsIdentity]::GetCurrent().Name } else { "$env:USER" }
-            $null = Remove-TaskIfAny
+            # No Remove-TaskIfAny first. New-RefreshTask registers with -Force,
+            # which replaces a task in place, so removing bought nothing and
+            # carried all the risk: if the remove succeeded and the register
+            # then threw, the catch below wrote a warning and left NO task -
+            # while Write-RefreshIni never ran, so automatic-refresh.ini still
+            # said a daily refresh was set up and the console kept promising
+            # one. Replacing in place cannot leave that gap.
             New-RefreshTask -RunAs $me -TimeValue $Time -PythonForTask $Python
             Write-RefreshIni -ModeValue 'while-signed-in' -TimeValue $Time -RunAs $me -KeepSignedIn $true `
                 -Tenant $curTenant -Client $curClient -Thumbprint $curThumb -Expires $curExpires
@@ -446,7 +462,10 @@ try {
             }
 
             # ---- 6. schedule it as SYSTEM ---- #
-            $null = Remove-TaskIfAny
+            # Replaced in place, never removed first - see the note in
+            # 'while-signed-in' above. This is the route where it matters most:
+            # a SYSTEM task removed and not recreated leaves a machine that
+            # believes it refreshes itself overnight and does not.
             New-RefreshTask -RunAs 'SYSTEM' -TimeValue $Time -PythonForTask $pyExe
             Write-RefreshIni -ModeValue 'unattended' -TimeValue $Time -RunAs 'SYSTEM' -KeepSignedIn $false `
                 -Tenant $t -Client $c -Thumbprint $thumb -Expires $expires

@@ -850,6 +850,38 @@ function Get-CertSignInWords {
     return "$plain ($($Message.Trim()))"
 }
 
+function Test-RefreshTaskPresent {
+    <# Is the daily refresh job actually IN Task Scheduler?
+
+       automatic-refresh.ini says what this computer is SET UP to do; it cannot
+       say whether the job that does it still exists. Those two came apart on a
+       real machine: the ini said "unattended, 07:00, SYSTEM", the console
+       footer promised a refresh every morning, and four days of mornings
+       produced no run at all. Nothing anywhere compared the promise with the
+       thing that keeps it.
+
+       Three answers, not two. $true it is there, $false it is definitely not,
+       and $null when this cannot tell - not Windows, no Task Scheduler
+       cmdlets, or an error that is not "no such task". Only a definite $false
+       is allowed to raise anything on the page: a machine that cannot ask must
+       never be told its schedule has vanished. #>
+    param([string]$TaskName)
+    if (-not $TaskName -or $env:OS -ne 'Windows_NT') { return $null }
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return $null }
+    try {
+        $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        if ($t) { return $true }
+        return $false
+    } catch {
+        $cat = ''
+        try { $cat = "$($_.CategoryInfo.Category)" } catch { }
+        if ($cat -eq 'ObjectNotFound' -or "$($_.Exception.Message)" -match 'No MSFT_ScheduledTask objects found') {
+            return $false
+        }
+        return $null       # could not ask - say nothing rather than something wrong
+    }
+}
+
 function Invoke-SignInProbe {
     <# A scheduled run signs in from a short-lived child PowerShell with a time
        limit. If the saved sign-in is still good the child finishes in seconds
@@ -885,6 +917,10 @@ $refreshIni   = Read-IniFile $RefreshConfig
 $schedMode    = (Get-IniValue $refreshIni 'schedule' 'mode' 'off').ToLowerInvariant()
 $schedTime    = Get-IniValue $refreshIni 'schedule' 'time'
 $schedRunAs   = Get-IniValue $refreshIni 'schedule' 'run_as'
+# schedule-refresh.ps1 writes the job's name into the ini; the fallback is the
+# name it has always used, for an ini written before that key existed.
+$schedTask    = Get-IniValue $refreshIni 'schedule' 'task' 'IT Ops Console - automatic refresh'
+$script:TaskPresent = if ($schedMode -eq 'off') { $null } else { Test-RefreshTaskPresent $schedTask }
 # Staying signed in between runs is a choice a person made in setup, and only
 # for the "while I'm signed in" schedule. Anything else signs out at the end,
 # exactly as before.
@@ -1154,7 +1190,8 @@ function Write-RefreshStatus {
         Message      = (@($Summary) -join ' ')
         SignIn       = [ordered]@{ Mode = $script:SignIn.Mode; Ok = $script:SignIn.Ok; Detail = $script:SignIn.Detail; Dropped = @($script:SignIn.Dropped); Missing = @($script:SignIn.Missing) }
         Steps        = @($results.ToArray() | ForEach-Object { [ordered]@{ Step = $_.Step; Status = $_.Status; Detail = $_.Detail } })
-        Schedule     = [ordered]@{ Mode = $schedMode; Time = $schedTime; RunAs = $schedRunAs }
+        Schedule     = [ordered]@{ Mode = $schedMode; Time = $schedTime; RunAs = $schedRunAs
+                                   Task = $schedTask; TaskPresent = $script:TaskPresent }
         KeepSignedIn = [bool]$keepSignedIn
         Certificate  = $null
     }
