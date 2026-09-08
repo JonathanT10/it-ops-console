@@ -753,14 +753,86 @@ function Get-IniValue {
     return $Default
 }
 
+# A certificate's private key that THIS account cannot open is not a passing
+# problem - it is a fact about this machine and this person, and it will be
+# just as true tomorrow. Written down when it happens so a manual refresh
+# stops walking into it every single time.
+$CERT_MEMO_FILE = 'cert-key-unusable.json'
+
+function Get-CurrentUserName {
+    <# Who is running this. Never empty: an empty name would still MATCH
+       another empty one, so the memory would work by accident while telling
+       whoever reads the file nothing at all about whose problem it was. #>
+    if ($env:OS -eq 'Windows_NT') {
+        try {
+            $n = "$([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+            if ($n) { return $n }
+        } catch { }
+    }
+    foreach ($candidate in @("$env:USER", "$env:USERNAME")) {
+        if ($candidate) { return $candidate }
+    }
+    return '(unknown account)'
+}
+
+function Test-CertKeyFailure {
+    <# Is this the "your account cannot open the private key" failure, as
+       opposed to Microsoft rejecting the certificate? Only the first is a
+       permanent fact about this account worth remembering; the second is
+       fixed by uploading a new certificate and must keep being reported. #>
+    param([string]$Message)
+    return ("$Message" -like '*Keyset does not exist*' -or
+            "$Message" -like '*key is not accessible*' -or
+            "$Message" -like '*private key*not*accessible*')
+}
+
+function Get-CertKeyMemo {
+    <# What this account already learned about this certificate, or $null.
+       Matched on thumbprint AND user: the key is readable by SYSTEM and
+       Administrators, so what one account cannot do says nothing about
+       another - and a scheduled run as SYSTEM must never inherit a desk
+       account's answer. #>
+    param([string]$Path, [string]$Thumbprint)
+    if (-not $Path -or -not $Thumbprint -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    $me = Get-CurrentUserName
+    try {
+        foreach ($row in @(Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)) {
+            if ("$($row.Thumbprint)" -eq $Thumbprint -and "$($row.User)" -eq $me) { return $row }
+        }
+    } catch { }
+    return $null
+}
+
+function Add-CertKeyMemo {
+    <# Remember it. Nothing here is a secret: a thumbprint is public, and the
+       reason is the sentence already printed on screen. Keyed by thumbprint,
+       so a NEW certificate is tried afresh - the memory expires by itself
+       rather than needing anyone to clear it. #>
+    param([string]$Path, [string]$Thumbprint, [string]$Why)
+    if (-not $Path -or -not $Thumbprint) { return }
+    $me = Get-CurrentUserName
+    $rows = @()
+    if (Test-Path -LiteralPath $Path) {
+        try { $rows = @(Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json) } catch { $rows = @() }
+    }
+    $rows = @($rows | Where-Object {
+        $_ -and -not ("$($_.Thumbprint)" -eq $Thumbprint -and "$($_.User)" -eq $me) })
+    $rows += [ordered]@{ Thumbprint = $Thumbprint; User = $me; Why = "$Why"
+                         WhenUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    try {
+        $null = New-Item -ItemType Directory -Path (Split-Path $Path -Parent) -Force
+        ConvertTo-Json @($rows) -Depth 4 | Set-Content -Path $Path -Encoding UTF8
+    } catch { }
+}
+
 function Get-RefreshCertificateInfo {
     <# The registered-app route needs three things from the ini (tenant, app,
        certificate thumbprint) and the certificate itself in this computer's
        store. Report what is there and how long the certificate has left, so
        the run - and the console - can say "expires in 12 days" before it
        silently stops working. #>
-    param($Ini)
-    $info = @{ Configured = $false; TenantId = ''; ClientId = ''; Thumbprint = ''; Present = $false; Expires = $null; DaysLeft = $null; Expired = $false; KeyUsable = $false; KeyWhy = '' }
+    param($Ini, [string]$MemoPath)
+    $info = @{ Configured = $false; TenantId = ''; ClientId = ''; Thumbprint = ''; Present = $false; Expires = $null; DaysLeft = $null; Expired = $false; KeyUsable = $false; KeyWhy = ''; KeyRemembered = $false }
     $info.Thumbprint = (Get-IniValue $Ini 'signin' 'certificate_thumbprint') -replace '\s', ''
     $info.TenantId   = Get-IniValue $Ini 'signin' 'tenant_id'
     $info.ClientId   = Get-IniValue $Ini 'signin' 'client_id'
@@ -826,6 +898,18 @@ function Get-RefreshCertificateInfo {
     if ($info.Expires) {
         $info.DaysLeft = [int][math]::Floor(($info.Expires - (Get-Date)).TotalDays)
         $info.Expired = $info.DaysLeft -lt 0
+    }
+    # What this account already learned the hard way beats anything asked here.
+    # Twice now a pre-flight has said the key was fine and the sign-in has then
+    # failed with "Keyset does not exist" - asking for a key handle, and even
+    # signing with it, is not the same question Microsoft's own credential
+    # asks. So the answer that counts is the one from a real attempt.
+    $memo = Get-CertKeyMemo -Path $MemoPath -Thumbprint $info.Thumbprint
+    if ($memo) {
+        $info.KeyUsable = $false
+        $info.KeyRemembered = $true
+        $info.KeyWhy = "$($memo.Why)"
+        if ($memo.WhenUtc) { $info.KeyWhy = "$($info.KeyWhy) (tried on $("$($memo.WhenUtc)".Substring(0, 10)))" }
     }
     return $info
 }
@@ -1050,7 +1134,12 @@ $script:Update = Get-UpdateState -Installed (Get-SuiteVersion $PSScriptRoot) `
 $keepSignedIn = (-not $Scheduled) -or
                 (($schedMode -eq 'while-signed-in') -and
                  ((Get-IniValue $refreshIni 'signin' 'keep_signed_in' 'no') -match '^(yes|true|1)$'))
-$certInfo     = Get-RefreshCertificateInfo $refreshIni
+# The memory is consulted only for a refresh a PERSON started. A scheduled run
+# is the certificate's own route - it must always try, and its failure must
+# keep being reported until someone fixes it, never quietly skipped because a
+# desk account once could not open the key.
+$certInfo     = Get-RefreshCertificateInfo $refreshIni `
+                    -MemoPath $(if ($Scheduled) { '' } else { Join-Path $OutputRoot $CERT_MEMO_FILE })
 
 # ---- the sign-in ladder --------------------------------------------------- #
 # 1. the registered app + this computer's certificate (unattended schedule)
@@ -1152,7 +1241,11 @@ if (-not $needGraph) {
             if ($certWhyNot -and $Scheduled) {
                 Drop-SignInRung $certWhyNot
             } elseif ($certWhyNot) {
-                $note = "$certWhyNot This refresh signs you in instead."
+                # A remembered failure is not a warning - it is the reason this
+                # run is not about to repeat something that already failed.
+                $note = if ($certInfo.KeyRemembered) {
+                    "The registered app's certificate cannot be opened by your account on this computer - $($certInfo.KeyWhy). That is normal: it belongs to the scheduled refresh, which runs as this computer. This refresh signs you in instead."
+                } else { "$certWhyNot This refresh signs you in instead." }
                 Write-Host $note
                 Add-StatusLine 'signin' $note
             } else {
@@ -1170,7 +1263,17 @@ if (-not $needGraph) {
                     $script:GraphConnectedByUs = $true
                     $script:SignIn.Mode = 'app'
                 } catch {
-                    Drop-SignInRung ("Signing in as the registered app failed: " + (Get-CertSignInWords $_.Exception.Message))
+                    $raw = "$($_.Exception.Message)"
+                    Drop-SignInRung ("Signing in as the registered app failed: " + (Get-CertSignInWords $raw))
+                    # Write it down - but only for a refresh a PERSON started.
+                    # A scheduled run as SYSTEM hitting this is a real fault
+                    # that must keep being reported until someone fixes it,
+                    # and remembering it would quietly stop it trying.
+                    if (-not $Scheduled -and (Test-CertKeyFailure $raw)) {
+                        Add-CertKeyMemo -Path (Join-Path $OutputRoot $CERT_MEMO_FILE) `
+                            -Thumbprint $certInfo.Thumbprint `
+                            -Why "this account is not allowed to use the certificate's private key on this computer"
+                    }
                 }
             }
         }

@@ -483,6 +483,19 @@ if ($python) {
 Write-Host ''
 Write-Host '--- 4/6 Wiring the console to the tools ---'
 $consoleDir = Join-Path $tools 'it-ops-console'
+# A refresh that finds it cannot open the registered app's certificate writes
+# that down and stops trying, so it is not walked into on every single run.
+# Running setup is a person saying "fix my install" - it may have made a new
+# certificate, or been run as an administrator and repaired the old one's
+# permissions - so the note is torn up here. The worst that costs is one more
+# attempt, which writes it again if nothing changed.
+$certMemo = Join-Path $output 'cert-key-unusable.json'
+if (Test-Path $certMemo) {
+    try {
+        Remove-Item $certMemo -Force -ErrorAction Stop
+        Write-Host '  cleared what a refresh had learned about the certificate - it will try again once'
+    } catch { }
+}
 $sources = @"
 # Written by setup.ps1 on $(Get-Date -Format yyyy-MM-dd). Safe to edit.
 [console]
