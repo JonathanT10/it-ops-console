@@ -790,7 +790,22 @@ try {
     Check 'one card posted to the webhook' ((Test-Path $hookLog) -and @(Get-Content $hookLog).Count -eq 1)
     $card = (Get-Content $hookLog -Raw | ConvertFrom-Json)
     $cardText = ($card.attachments[0].content.body | ForEach-Object { $_.text }) -join "`n"
-    Check 'card announces new alerts from the sample data' ($cardText -like 'IT Ops Console: * new*' -and $cardText -like '*Admin without MFA*')
+    # The state file is deleted just above, so this is the console's FIRST
+    # message and must read as a starting point, not as a pile of news.
+    # (The old assertion here was `-like 'IT Ops Console: * new*'`, which passes
+    # against a starting point too - the words "new, gets worse, or clears"
+    # appear in its explanation. A wildcard that broad tests nothing.)
+    # Assert on the TITLE BLOCK, not the joined text. Searching the whole card
+    # for "new" is what made the old assertion meaningless: the explanation
+    # line says "new, gets worse, or clears", so both a starting point and a
+    # pile of news match. The title is the only place the distinction lives.
+    $cardTitle = "$($card.attachments[0].content.body[0].text)"
+    Check 'the first card is a starting point, not a count of new alerts' (
+        $cardTitle -like 'IT Ops Console: starting point - * open*' -and
+        $cardTitle -notlike '*new*')
+    Check 'and it still names what is wrong' ($cardText -like '*Admin without MFA*')
+    Check 'it says where things stand rather than what happened' (
+        $cardText -like '*where things stand right now*')
     Check 'alerts-state.json written' (Test-Path (Join-Path $out 'alerts-state.json'))
     Check 'plain words on screen' ($text -like '*Sent to Teams.*')
     # second run: nothing changed -> no post, step still ok

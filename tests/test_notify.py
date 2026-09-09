@@ -3,11 +3,12 @@
 Runs notify.py against a fake Teams webhook (a local HTTP server that records
 what was posted) and a fake mail relay (a local SMTP listener that records the
 message), so every delivery decision can be checked without touching Teams or
-a real relay: first run tells everything, a repeat run stays quiet, a new or
-worse alert speaks, a cleared one is reported once, the weekly digest fires on
-its day, every-refresh mode summarises each time, a failed post leaves the
-alerts untold so they are retried, --test and --dry-run behave, and hostile
-names cannot turn into links in a card.
+a real relay: the FIRST message is a starting point rather than a wall of
+findings, a repeat run stays quiet, a new or worse alert speaks, a cleared one
+is reported once, the weekly digest fires on its day, every-refresh mode
+summarises each time, a failed post leaves the alerts untold so they are
+retried, --test and --dry-run behave, and hostile names cannot turn into links
+in a card.
 """
 
 from __future__ import annotations
@@ -153,7 +154,10 @@ def main():
     st = os.path.join(tmp, "alerts-state.json")
     base = ["--config", ini, "--alerts", aj, "--state", st]
 
-    # -- 1. first run: everything is new, one card ------------------------ #
+    # -- 1. the FIRST message is a starting point, not a wall ------------- #
+    # With no state every open alert is technically "new", so a console pointed
+    # at a real tenant would introduce itself to a channel with dozens of
+    # findings. That is how a team learns to ignore a channel on day one.
     write_ini(ini, webhook=url, link="https://intranet.example.test/console/")
     a1 = alert("security/admin_without_mfa/a@x", "critical", title="Admin without MFA: Ann <b>Admin</b>")
     a2 = alert("fleet/device_offline/10.0.0.1", "warning", tab="fleet", title="Printer offline: Warehouse")
@@ -162,17 +166,32 @@ def main():
     check("first run: exit 0, sent to Teams", code == 0 and "Sent to Teams." in out)
     check("first run: one post", len(Webhook.posts) == 1)
     txt = card_text(Webhook.posts[-1])
-    check("first run: title counts the new alerts", "IT Ops Console: 2 new" in txt)
-    check("first run: grouped by tab with severity tags",
-          "Security:" in txt and "Print fleet:" in txt and "[CRITICAL] Admin without MFA" in txt and "[WARNING] Printer offline" in txt)
-    check("first run: next step under each line", "-> Do the thing." in txt)
+    check("first run: says starting point, and counts what is OPEN not what is new",
+          "starting point - 2 open" in txt and "2 new" not in txt)
+    check("first run: breaks the open count down by severity",
+          "1 critical, 1 warning" in txt)
+    check("first run: says in words that this is not 2 new problems",
+          "not 2 things that just happened" in txt)
+    check("first run: promises change-only from here",
+          "only hear when something is new, gets worse, or clears" in txt)
+    check("first run: names the most serious one", "[CRITICAL] Admin without MFA" in txt)
+    check("first run: a count per page, so nothing is hidden",
+          "Everything open, by page" in txt and "Print fleet: 1 info" not in txt
+          and "Print fleet: 1 warning" in txt)
+    check("first run: no per-line next steps in the starting point",
+          "-> Do the thing." not in txt)
     check("first run: footer names the refresh time and the console", "Refresh at 2026-09-02T07:00:00Z" in txt and "intranet.example.test" in txt)
     card = Webhook.posts[-1]["attachments"][0]["content"]
     check("first run: open-console button when the link is a URL", card.get("actions", [{}])[0].get("url", "").startswith("https://intranet"))
     check("first run: angle brackets in names neutralised", "<b>" not in txt and "‹b›" in txt)
     state = json.load(open(st))
-    check("first run: state marks both as told with first_seen", all(v["notified"] and v["first_seen"] for v in state["alerts"].values())
-          and state["last_sent"] and state["history"][0]["new"] == 2)
+    check("first run: state marks both as told with first_seen",
+          all(v["notified"] and v["first_seen"] for v in state["alerts"].values()) and state["last_sent"])
+    check("first run: the history records 0 new, flagged as the baseline",
+          state["history"][0]["new"] == 0 and state["history"][0]["open"] == 2
+          and state["history"][0]["baseline"] is True)
+    check("first run: it also counts as that day's digest, so day one is not said twice",
+          state["last_digest"] == datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
     # -- 2. same alerts again: quiet ------------------------------------- #
     code, out = run(base)
@@ -207,6 +226,17 @@ def main():
     # -- 6. weekly digest on its day -------------------------------------- #
     today = datetime.now(timezone.utc).strftime("%A")
     write_ini(ini, webhook=url, digest_day=today)
+    # The starting point in case 1 already listed everything open, which is
+    # exactly what a digest says - so it stamped today as the digest day and a
+    # digest must NOT also go out. Prove that before testing the digest itself.
+    n_before = len(Webhook.posts)
+    code, out = run(base)
+    check("digest: suppressed on the day the starting point went out",
+          len(Webhook.posts) == n_before and "No alert sent" in out)
+    st_doc = json.load(open(st))
+    st_doc["last_digest"] = "2000-01-01"
+    with open(st, "w") as fh:
+        json.dump(st_doc, fh)
     code, out = run(base)
     txt = card_text(Webhook.posts[-1])
     check("digest: sent on its day even with nothing new", len(Webhook.posts) == 5 and "weekly summary: 2 open" in txt and "Open" in txt)
@@ -263,8 +293,14 @@ def main():
     code, out = run(base)
     check("email: sent through the relay", code == 0 and "Emailed it@example.test, boss@example.test." in out and len(SmtpHandler.messages) == 1)
     mail = SmtpHandler.messages[-1]
-    check("email: subject is the title, body has the lines and the next step",
-          "Subject: IT Ops Console: 1 new" in mail and "[CRITICAL] Admin without MFA" in mail and "-> Do the thing." in mail)
+    check("email: subject is the title, body has the lines",
+          # The state file was deleted just above, so this is a first message
+          # again - and the baseline has to read the same way over email.
+          "Subject: IT Ops Console: starting point - 1 open" in mail
+          and "[CRITICAL] Admin without MFA" in mail)
+    check("email: a single alert is not described as '1 things'",
+          "1 things that just happened" not in mail
+          and "The alert below is not something that just happened" in mail)
     check("email: addressed to both", "To: it@example.test, boss@example.test" in mail)
 
     # -- 12. both channels, one failing: the other still counts ------------- #
@@ -275,6 +311,103 @@ def main():
     check("both: Teams failed, email sent -> exit 1 but alerts told", code == 1 and "Emailed" in out
           and json.load(open(st))["alerts"][a2["key"]]["notified"] is True)
     Webhook.status = 200
+
+
+    # -- 14. the starting point, in the shapes the sequence above cannot reach #
+    def fresh(dirname):
+        d = os.path.join(tmp, dirname)
+        os.makedirs(d, exist_ok=True)
+        return (os.path.join(d, "alerts.ini"), os.path.join(d, "alerts.json"),
+                os.path.join(d, "alerts-state.json"))
+
+    # (a) a busy tenant: the cap holds, and it spreads across pages instead of
+    #     spending every line on whichever page happens to be worst.
+    bi, ba, bs = fresh("busy")
+    write_ini(bi, webhook=url)
+    many = ([alert("identity/ca_gap/%d" % i, "critical", tab="identity",
+                   title="CA gap %d" % i) for i in range(21)]
+            + [alert("security/admin_without_mfa/%d" % i, "critical",
+                     title="Admin without MFA %d" % i) for i in range(4)]
+            + [alert("licensing/unused/%d" % i, "warning", tab="licensing",
+                     title="Unused seats %d" % i) for i in range(11)]
+            + [alert("fleet/supply/%d" % i, "info", tab="fleet",
+                     title="Low toner %d" % i) for i in range(3)])
+    write_alerts(ba, many)
+    n_before = len(Webhook.posts)
+    code, out = run(["--config", bi, "--alerts", ba, "--state", bs])
+    txt = card_text(Webhook.posts[-1])
+    check("busy: one message, not one per alert",
+          code == 0 and len(Webhook.posts) == n_before + 1)
+    check("busy: the title is the open count, not 39 new",
+          "starting point - 39 open (25 critical, 11 warning, 3 info)" in txt
+          and "39 new" not in txt)
+    named = txt.count("[CRITICAL]")
+    check("busy: the named list is capped", named == notify.BASELINE_MAX_LINES)
+    check("busy: and it names BOTH bad pages, not just the worst one",
+          "CA gap" in txt and "Admin without MFA" in txt)
+    check("busy: it says how many it did not name", "(+15 more like these" in txt)
+    check("busy: every page still gets a count, so nothing is hidden",
+          "Identity: 21 critical" in txt and "Security: 4 critical" in txt
+          and "Licensing: 11 warning" in txt and "Print fleet: 3 info" in txt)
+    check("busy: the card stays a readable length",
+          len(Webhook.posts[-1]["attachments"][0]["content"]["body"]) < 40)
+
+    # (b) a state file that EXISTS but has never sent anything is still a first
+    #     message - runs before a channel was configured leave exactly that.
+    ei, ea, es = fresh("existing")
+    write_ini(ei, webhook=url)
+    write_alerts(ea, [a1, a2])
+    with open(es, "w") as fh:
+        json.dump({"alerts": {a1["key"]: {"severity": "critical", "tab": "security",
+                                          "title": "x", "transient": False,
+                                          "first_seen": "2026-09-01T00:00:00Z",
+                                          "last_seen": "2026-09-01T00:00:00Z",
+                                          "notified": False}},
+                   "last_sent": None, "last_digest": None, "history": []}, fh)
+    n_before = len(Webhook.posts)
+    code, out = run(["--config", ei, "--alerts", ea, "--state", es])
+    check("state file with nothing ever sent: still a starting point",
+          "starting point - 2 open" in card_text(Webhook.posts[-1]))
+    check("is_first_message() is about last_sent, not about the file existing",
+          notify.is_first_message({"alerts": {"x": {}}, "last_sent": None}) is True
+          and notify.is_first_message({"last_sent": "2026-09-09T00:00:00Z"}) is False)
+
+    # (c) a starting point that FAILED to send is still a starting point next
+    #     time - it must not become "2 new" just because it was attempted.
+    fi, fa, fs = fresh("failed")
+    write_ini(fi, webhook=url)
+    write_alerts(fa, [a1, a2])
+    Webhook.status = 500
+    code, out = run(["--config", fi, "--alerts", fa, "--state", fs])
+    check("failed starting point: exit 1 and nothing marked told",
+          code == 1 and json.load(open(fs))["alerts"][a1["key"]]["notified"] is False
+          and not json.load(open(fs))["last_sent"])
+    Webhook.status = 200
+    code, out = run(["--config", fi, "--alerts", fa, "--state", fs])
+    check("failed starting point: the retry is STILL a starting point",
+          "starting point - 2 open" in card_text(Webhook.posts[-1])
+          and "2 new" not in card_text(Webhook.posts[-1]))
+
+    # (d) and afterwards it behaves like any other console
+    a_new = alert("security/legacy_auth/x@x", "critical", title="Legacy auth in use")
+    write_alerts(fa, [a1, a2, a_new])
+    code, out = run(["--config", fi, "--alerts", fa, "--state", fs])
+    txt = card_text(Webhook.posts[-1])
+    check("after a starting point: a real new alert is normal news, with its next step",
+          "IT Ops Console: 1 new" in txt and "Legacy auth in use" in txt
+          and "-> Do the thing." in txt)
+    check("after a starting point: what it already told is not repeated",
+          "Admin without MFA" not in txt and "starting point" not in txt)
+
+    # (e) a quiet tenant gets told alerts are working, not silence
+    qi, qa, qs = fresh("quiet")
+    write_ini(qi, webhook=url)
+    write_alerts(qa, [])
+    code, out = run(["--config", qi, "--alerts", qa, "--state", qs])
+    txt = card_text(Webhook.posts[-1])
+    check("quiet tenant: the first message still goes, so the channel is proven",
+          code == 0 and "starting point - nothing open" in txt
+          and "Alerts are connected and nothing is firing." in txt)
 
     # -- 13. clean() ---------------------------------------------------------- #
     check("clean: markdown link syntax broken up", notify.clean("[x](http://evil)") == "[x] (http://evil)")
