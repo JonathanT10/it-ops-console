@@ -172,6 +172,14 @@ function Get-PlainWords {
     if ($Step -eq 'alerts') {
         return 'The alert message could not be sent - check the Teams Workflows URL or the mail relay in alerts.ini. The console itself was rebuilt.'
     }
+    # The printer collector exits 3 for exactly one thing: it could not use the
+    # SNMP library, so it checked NOTHING. That has to read differently from a
+    # printer that did not answer, because the person's next move is completely
+    # different - and because the old code called it "unreachable", which sent
+    # somebody to go look at three printers that were working fine.
+    if ($Step -eq 'print-fleet-collector' -and $Detail -eq 'exit code 3') {
+        return 'The printers were not checked at all: the checker needs a piece of Python called pysnmp and the account that ran this cannot see it. No printer has been marked offline and nothing was recorded - the printer page still shows the last real reading. Install pysnmp for the whole computer rather than for one person: the daily refresh runs as the computer itself, which cannot see a library installed under a single account. The exact command is in the run log.'
+    }
     switch -Wildcard ($Detail) {
         '*AADSTS*'                       { return 'The sign-in did not complete. Run this again and finish the sign-in window.' }
         '*Authentication needed*'        { return 'You were not signed in. Run this again and finish the sign-in window.' }

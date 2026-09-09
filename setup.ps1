@@ -479,6 +479,62 @@ if ($python) {
     }
 }
 
+# The printer collector needs pysnmp. Nothing in this suite used to install it
+# or check for it, so it only ever arrived if somebody typed pip themselves -
+# and typing pip as yourself installs it for YOU. The daily refresh runs as the
+# computer (SYSTEM), which cannot see a per-account library, so the printer step
+# would run, check nothing, and report healthy printers as offline. Install it
+# here, and say plainly which of the two it landed for.
+if ($python) {
+    $haveSnmp = $false
+    try {
+        if ($onWindows) { $haveSnmp = -not ((& cmd.exe /d /c "$python -c ""import pysnmp"" 2>&1" | Out-String).Trim()) }
+        else            { $null = & $python -c 'import pysnmp'; $haveSnmp = ($LASTEXITCODE -eq 0) }
+    } catch { $haveSnmp = $false }
+
+    $elevated = $false
+    if ($onWindows) {
+        try {
+            $elevated = ([Security.Principal.WindowsPrincipal] `
+                [Security.Principal.WindowsIdentity]::GetCurrent()
+            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        } catch { $elevated = $false }
+    }
+
+    if ($haveSnmp) {
+        Write-Host '  printer support (pysnmp): already installed'
+    } elseif ($Unattended) {
+        # -Unattended promises to skip install offers (see the header). Reaching
+        # out to a package index is exactly the kind of thing that promise is
+        # about, and on a machine with no route out it would sit there waiting.
+        Write-Host '  printer support (pysnmp): skipped - unattended setup installs nothing'
+    } elseif (Ask-YesNo '  Install printer support (pysnmp)? Needed only if you add printers' $true) {
+        # Elevated: no --user, so it goes machine-wide and SYSTEM can see it.
+        # Not elevated: --user is the only thing that will succeed, and it is
+        # explicitly NOT enough for an unattended daily refresh - say so.
+        $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', 'pysnmp>=7.1')
+        if (-not $elevated) { $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--user', 'pysnmp>=7.1') }
+        & $python @pipArgs
+        try {
+            if ($onWindows) { $haveSnmp = -not ((& cmd.exe /d /c "$python -c ""import pysnmp"" 2>&1" | Out-String).Trim()) }
+            else            { $null = & $python -c 'import pysnmp'; $haveSnmp = ($LASTEXITCODE -eq 0) }
+        } catch { $haveSnmp = $false }
+        if ($haveSnmp -and $elevated) {
+            Write-Host '  printer support (pysnmp): installed for the whole computer'
+        } elseif ($haveSnmp) {
+            Write-Host '  printer support (pysnmp): installed for YOUR account only'
+            Write-Warning '  That is enough when you refresh by hand. It is NOT enough for the daily'
+            Write-Warning '  automatic refresh, which runs as the computer and cannot see it. If you'
+            Write-Warning '  schedule that in step 6, re-run this setup from an Administrator window.'
+        } else {
+            Write-Warning '  pysnmp did not install. Printers are optional - everything else works.'
+            Write-Warning "  To try again later: $python -m pip install ""pysnmp>=7.1"""
+        }
+    } else {
+        Write-Host '  printer support (pysnmp): skipped - add it later if you add printers'
+    }
+}
+
 # --------------------------------------------------------------------------- #
 Write-Host ''
 Write-Host '--- 4/6 Wiring the console to the tools ---'

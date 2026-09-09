@@ -205,6 +205,44 @@ if ($mode -ne 'off') {
         } catch { Note "could not read the task's run history ($($_.Exception.Message))" }
     }
 }
+# ---- printers ---- #
+# Only worth saying anything about when printers are actually configured. The
+# collector needs pysnmp, and NOTHING in this suite used to install it or check
+# for it - which is how a laptop ended up with it under one account only. The
+# daily job runs as a different account, so it silently checked nothing and the
+# console reported three healthy printers as offline. Two accounts, two answers:
+# say which one was tested here, because passing as you proves nothing about it.
+$pfdCfg = Join-Path (Join-Path $tools 'print-fleet-dashboard') 'config.ini'
+$printersListed = $false
+if (Test-Path $pfdCfg) {
+    $sec = ''
+    foreach ($raw in Get-Content $pfdCfg) {
+        $l = $raw.Trim()
+        if ($l -match '^\[(.+)\]$') { $sec = $matches[1].ToLower(); continue }
+        if ($l -and $l -notmatch '^[#;]' -and $l -match '=' -and ($sec -eq 'devices' -or $sec -eq 'ranges')) {
+            if ($l.Substring($l.IndexOf('=') + 1).Trim()) { $printersListed = $true }
+        }
+    }
+}
+if ($printersListed) {
+    $who = try { [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { 'this account' }
+    $snmpOk = $false
+    if ($py) {
+        $probe = try { (& cmd.exe /d /c "$py -c ""import pysnmp"" 2>&1" | Out-String) } catch { 'no python' }
+        $snmpOk = -not ("$probe".Trim())
+    }
+    if ($snmpOk) {
+        Say "printer checks: the SNMP library is installed for $who"
+        if ($mode -eq 'unattended') {
+            Note "the daily refresh runs as SYSTEM, not as $who - if the printer page ever shows every printer offline at once, the library is missing for SYSTEM rather than the printers being down. Installing it from an Administrator window covers both."
+        }
+    } elseif ($py) {
+        Gap "printers are listed but the SNMP library is missing for $who - the printer page cannot update. From an Administrator PowerShell window: $py -m pip install ""pysnmp>=7.1"""
+    } else {
+        Note 'printers are listed but Python 3 was not found, so the SNMP library could not be checked'
+    }
+}
+
 # ---- alerts ---- #
 $alertsIni = Join-Path (Join-Path $tools 'it-ops-console') 'alerts.ini'
 if (Test-Path $alertsIni) {
