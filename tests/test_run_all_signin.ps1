@@ -142,7 +142,7 @@ function Get-Item {
 
 function Run-Case {
     param([string]$Graph, [string]$CertNotAfter, [string]$IniText, [switch]$Desktop, [switch]$NoConnect, [switch]$NoKey, [int]$Timeout = 30, [int]$StepTimeout = 0,
-          [string]$UpdateCache, [string]$CertMemo)
+          [string]$UpdateCache, [string]$CertMemo, [int]$FleetExit = -1, [string]$FleetSays)
     if (Test-Path $log) { Remove-Item $log }
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     if (Test-Path $site) { Remove-Item $site -Recurse -Force }
@@ -155,6 +155,23 @@ function Run-Case {
     if ($IniText) { Set-Content $ini $IniText } elseif (Test-Path $ini) { Remove-Item $ini }
     # earlier cases leave the price-list starter behind; each case starts clean
     Remove-Item (Join-Path $tools 'm365-license-waste-report/prices.ini') -ErrorAction SilentlyContinue
+    # The printer step runs only when config.ini exists AND differs from the
+    # example. -FleetExit stands up both that and a collector that exits with
+    # the code asked for, so the wiring from "the collector said 3" through to
+    # what a person reads can be driven end to end.
+    $pfd = Join-Path $tools 'print-fleet-dashboard'
+    Remove-Item (Join-Path $pfd 'config.ini') -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $pfd 'collector.py') -ErrorAction SilentlyContinue
+    if ($FleetExit -ge 0) {
+        Set-Content (Join-Path $pfd 'config.example.ini') "[devices]`n"
+        Set-Content (Join-Path $pfd 'config.ini') "[devices]`nFront Stairs = 10.9.9.1`n"
+        $says = if ($FleetSays) { $FleetSays } else { 'stub fleet' }
+        Set-Content (Join-Path $pfd 'collector.py') @"
+import sys
+print(r'''$says''')
+sys.exit($FleetExit)
+"@
+    }
     $env:ITOPS_STUB_GRAPH = $Graph
     $env:ITOPS_STUB_CERT_NOTAFTER = $CertNotAfter
     $env:ITOPS_STUB_CERT_NOKEY = if ($NoKey) { '1' } else { $null }
@@ -806,6 +823,44 @@ Check 'and it is the finished run, not an empty file' ($pj -like '*window.PROGRE
 Check 'the live page itself is beside it' (Test-Path (Join-Path $site 'status.html'))
 $sp = if (Test-Path (Join-Path $site 'status.html')) { Get-Content (Join-Path $site 'status.html') -Raw } else { '' }
 Check 'and it is the current template' ($sp -like "*progress.js?v=*")
+
+Write-Host ''
+Write-Host '-- 13. the printer collector could not use the SNMP library (exit 3)'
+# The bug this covers happened on a real 07:00 run: pysnmp was installed for one
+# account, the scheduled job runs as another, the collector reported three
+# healthy printers as offline and STILL exited 0, so the step said "ok". Now it
+# exits 3 and the words a person reads have to be about a missing library, not
+# about printers to go and look at.
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -FleetExit 3 `
+        -FleetSays '[x] The printers could not be checked.'
+$fleetStep = @($r.Status.Steps | Where-Object { $_.Step -eq 'print-fleet-collector' })
+Check '13 the step is recorded as failed, not ok' (
+    $fleetStep.Count -eq 1 -and $fleetStep[0].Status -eq 'FAILED')
+Check '13 the run itself does not pretend everything worked' ($r.Status.Ok -ne $true)
+Check '13 the plain words are about the library, not about a printer' (
+    $r.Text -like '*The printers were not checked at all*' -and $r.Text -like '*pysnmp*')
+Check '13 they say nothing was marked offline' (
+    $r.Text -like '*No printer has been marked offline*')
+Check '13 they say to install it for the whole computer, not one person' (
+    $r.Text -like '*whole computer*')
+Check '13 nobody is sent to go look at a printer' (
+    $r.Text -notlike '*powered on*')
+Check '13 the collector''s own words reached the log' (
+    $r.Text -like '*The printers could not be checked.*')
+
+Write-Host ''
+Write-Host '-- 14. a printer collector that fails for any OTHER reason is not blamed on the library'
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -FleetExit 1 -FleetSays 'boom'
+$fleetStep = @($r.Status.Steps | Where-Object { $_.Step -eq 'print-fleet-collector' })
+Check '14 still a failed step' ($fleetStep.Count -eq 1 -and $fleetStep[0].Status -eq 'FAILED')
+Check '14 but NOT the pysnmp sentence' ($r.Text -notlike '*pysnmp*')
+
+Write-Host ''
+Write-Host '-- 15. a printer collector that works is still just ok'
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -FleetExit 0 -FleetSays 'Done: 1 polled, 0 unreachable.'
+$fleetStep = @($r.Status.Steps | Where-Object { $_.Step -eq 'print-fleet-collector' })
+Check '15 ok' ($fleetStep.Count -eq 1 -and $fleetStep[0].Status -eq 'ok')
+Check '15 and no library talk anywhere' ($r.Text -notlike '*pysnmp*')
 
 Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
