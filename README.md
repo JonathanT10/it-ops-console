@@ -259,10 +259,24 @@ plain-English next step the console shows. A weekly summary
 (Mondays unless you change it) lists everything still open, or says "nothing
 open" — a heartbeat that also proves the refresh is running.
 
+The **first** message is deliberately different. With nothing to compare
+against, every open alert is technically new, so a console pointed at a real
+tenant would introduce itself with a wall of dozens of findings — the fastest
+way to teach a team that this channel is noise. Instead it sends a *starting
+point*: how many are open and at what severity, the most serious few by name
+spread across the pages they come from rather than all from the worst one, a
+count for every page so nothing is hidden, and a line saying in plain words
+that this is where things stand rather than what just happened. Everything is
+then marked as told, so the second message onwards is real change only. A
+starting point that fails to send is still a starting point on the next run,
+and it counts as that week's summary so day one is not said twice.
+
 **Turning it on.** Setup writes `tools\it-ops-console\alerts.ini` with every
 rule at its default and no channel. Paste your channel's Workflows URL under
-`[teams]` (in Teams: channel → ⋯ → Workflows → "Post to a channel when a
-webhook request is received"), or fill in `[email]` with your internal relay,
+`[teams]` (in Teams: channel → ⋯ → Workflows → "Send webhook alerts to a
+channel" → pick that team and channel → copy the URL; Microsoft has also
+called that template "Post to a channel when a webhook request is received"),
+or fill in `[email]` with your internal relay,
 then prove it from the console folder:
 
 ```
@@ -493,11 +507,15 @@ renders, unusable lines reported), alert state (new / worse / cleared / told),
 the Alerts page, the overview panel being the rules themselves (a rule turned
 off or a threshold moved changes the front page; one noisy rule is capped at
 five rows with a pointer to its page; change events and refresh troubles stay
-out), and a full sample build. `test_notify.py` (34 checks) runs
-`notify.py` against a local fake webhook and a local fake mail relay: first run
-tells everything, a repeat stays quiet, new and worse speak, cleared is said
-once, events are never "cleared", the weekly digest fires on its day, a failed
-post leaves alerts untold so they are retried, `--test` and `--dry-run`.
+out), and a full sample build. `test_notify.py` (56 checks) runs
+`notify.py` against a local fake webhook and a local fake mail relay: the first
+message is a starting point rather than a wall (capped, spread across pages,
+counting what is open rather than what is new, and still a starting point after
+a failed send or when a state file exists that has never sent), a repeat stays
+quiet, new and worse speak, cleared is said once, events are never "cleared",
+the weekly digest fires on its day but not on the day the starting point went
+out, a failed post leaves alerts untold so they are retried, `--test` and
+`--dry-run`.
 `test_apply_alerts.py` (37 checks) covers editing from the console: the merge
 keeps comments, the `[teams]` webhook and lines from newer versions, refuses a
 file it cannot parse, and never writes on a bad paste — and then opens the real

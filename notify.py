@@ -18,6 +18,14 @@ Either way, on the weekly digest day (alerts.ini [send] digest_day) one message
 lists everything still open, or says "nothing open" - a heartbeat that also
 proves the refresh is running.
 
+The FIRST message is a starting point, not news. With no state file every open
+alert is technically "new", so a console pointed at a busy tenant would open its
+account in a channel with a wall of dozens of findings - the fastest way to
+teach a team that this channel is noise. Instead the first message says how many
+are open, shows the most serious few, gives a count per page, and says plainly
+that this is where things stand rather than what just happened. Everything is
+then marked as told, so the second message onwards is real change only.
+
 State lives in alerts-state.json: which alerts people were already told about,
 when the last message went, when the last digest went. Standard library only.
 """
@@ -39,6 +47,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from console import alerts as A  # noqa: E402
 
 MAX_LINES_PER_SECTION = 25
+# The first message is deliberately shorter than a normal one. Nobody reads a
+# card with forty findings on it, and the point of that message is to be read.
+BASELINE_MAX_LINES = 10
 SEVERITY_TAG = {"critical": "[CRITICAL]", "warning": "[WARNING]", "info": "[info]"}
 
 
@@ -106,9 +117,90 @@ def _section(heading, alerts, with_action=True):
     return heading, lines
 
 
-def compose(diff, all_alerts, cfg, doc, digest, now):
+def _by_severity(alerts):
+    """'25 critical, 11 warning, 3 info' - in that order, skipping the empty."""
+    n = {}
+    for a in alerts:
+        n[a.get("severity")] = n.get(a.get("severity"), 0) + 1
+    return ", ".join("%d %s" % (n[s], s) for s in ("critical", "warning", "info") if n.get(s))
+
+
+def _baseline_sections(all_alerts):
+    """What the FIRST message shows: the worst few by name, then a count per
+    page so nothing is hidden by the cap."""
+    sections = []
+    worst = [a for a in all_alerts if a.get("severity") == "critical"] or \
+            [a for a in all_alerts if a.get("severity") == "warning"]
+
+    # Take a turn from each page rather than filling up from the first one.
+    # A tenant with 21 identity gaps and 4 admins without MFA would otherwise
+    # spend the whole cap on identity and never mention the admins - and the
+    # point of naming any of them is to show the SPREAD of what is wrong.
+    grouped = [(label, list(items)) for label, items in _group(worst)]
+    picked = {label: [] for label, _ in grouped}
+    taken = 0
+    while taken < BASELINE_MAX_LINES and any(items for _, items in grouped):
+        for label, items in grouped:
+            if taken >= BASELINE_MAX_LINES:
+                break
+            if items:
+                picked[label].append(items.pop(0))
+                taken += 1
+
+    lines = []
+    for label, _ in grouped:
+        if picked[label]:
+            lines.append("%s:" % label)
+            for a in picked[label]:
+                lines.append("  " + _line(a))
+    left = len(worst) - taken
+    if left > 0:
+        lines.append("(+%d more like these on the Alerts page)" % left)
+    if lines:
+        sections.append(("Worth looking at first", lines))
+
+    counts = []
+    for tab_label, items in _group(all_alerts):
+        counts.append("  %s: %s" % (tab_label, _by_severity(items)))
+    if counts:
+        sections.append(("Everything open, by page", counts))
+    return sections
+
+
+def compose(diff, all_alerts, cfg, doc, digest, now, baseline=False):
     """Title, one-line summary, and sections of plain lines. The same text goes
     to Teams (one text block per line) and email (joined with newlines)."""
+    if baseline:
+        n = len(all_alerts)
+        bits = _by_severity(all_alerts)
+        if n:
+            title = "IT Ops Console: starting point - %d open%s" % (n, (" (%s)" % bits) if bits else "")
+            if n == 1:
+                first = ("This is the first message from this console, so it is where things"
+                         " stand right now. The alert below is not something that just"
+                         " happened - it is simply what is open.")
+            else:
+                first = ("This is the first message from this console, so it is where things"
+                         " stand right now - not %d things that just happened. Most have been"
+                         " true for a while." % n)
+            why = [first,
+                   "From now on you will only hear when something is new, gets worse, or clears."]
+        else:
+            title = "IT Ops Console: starting point - nothing open"
+            why = ["Alerts are connected and nothing is firing.",
+                   "From now on you will only hear when something is new, gets worse, or clears."]
+        sections = [("", why)] + _baseline_sections(all_alerts)
+        footer = []
+        gen = (doc or {}).get("GeneratedUtc")
+        if gen:
+            footer.append("Refresh at %s (UTC)." % gen)
+        link = cfg["send"].get("console_link") or ""
+        if link:
+            footer.append("Console: %s" % link)
+        footer.append("What is watched, and how: the Alerts page in the console; settings in alerts.ini.")
+        return {"title": title, "summary": "starting point", "sections": sections,
+                "footer": footer, "link": link}
+
     counts = []
     if diff["new"]:
         counts.append("%d new" % len(diff["new"]))
@@ -155,7 +247,8 @@ def compose(diff, all_alerts, cfg, doc, digest, now):
 def as_text(msg):
     out = [msg["title"], ""]
     for heading, lines in msg["sections"]:
-        out.append(heading)
+        if heading:
+            out.append(heading)
         out.extend(lines)
         out.append("")
     out.extend(msg["footer"])
@@ -167,7 +260,8 @@ def as_card(msg):
         {"type": "TextBlock", "text": clean(msg["title"]), "weight": "Bolder", "size": "Medium", "wrap": True},
     ]
     for heading, lines in msg["sections"]:
-        body.append({"type": "TextBlock", "text": clean(heading), "weight": "Bolder", "wrap": True, "spacing": "Medium"})
+        if heading:
+            body.append({"type": "TextBlock", "text": clean(heading), "weight": "Bolder", "wrap": True, "spacing": "Medium"})
         for l in lines:
             body.append({"type": "TextBlock", "text": l, "wrap": True, "spacing": "None"})
     for f in msg["footer"]:
@@ -247,6 +341,19 @@ def deliver(cfg, msg, channels, env=None):
 # Decide
 # --------------------------------------------------------------------------- #
 
+def is_first_message(state):
+    """Has a message ever actually gone out from this state?
+
+    Deliberately NOT "does the state file exist". A file can exist and have
+    told nobody anything - runs before a channel was configured record what is
+    firing so first_seen dates stay honest, and a channel that was set up and
+    then removed leaves the same shape. In every one of those cases the next
+    message is still somebody's first, and a wall of findings is still the
+    wrong way to open.
+    """
+    return not (state.get("last_sent") or "")
+
+
 def digest_due(cfg, state, now):
     day = (cfg["send"].get("digest_day") or "").lower()
     if not day:
@@ -256,8 +363,12 @@ def digest_due(cfg, state, now):
     return (state.get("last_digest") or "") != now.strftime("%Y-%m-%d")
 
 
-def decide(cfg, diff, state, now):
+def decide(cfg, diff, state, now, baseline=False):
     """(send?, is_digest, reason in plain words)"""
+    if baseline:
+        # Always send, whatever [send] when says, and never as a digest: this
+        # message IS the starting point the digest would otherwise repeat.
+        return True, False, "this is the first message, so it says where things stand rather than what changed"
     digest = digest_due(cfg, state, now)
     changed = bool(diff["new"] or diff["worse"] or diff["cleared"])
     if cfg["send"]["when"] == "every-refresh":
@@ -324,9 +435,10 @@ def main(argv=None):
     state_path = args.state or os.path.join(os.path.dirname(os.path.abspath(args.alerts)), "alerts-state.json")
     state = load_json(state_path, None) or A.empty_state()
 
+    baseline = is_first_message(state)
     diff = A.diff_state(alerts, state)
-    send, digest, reason = decide(cfg, diff, state, now)
-    msg = compose(diff, alerts, cfg, doc, digest, now)
+    send, digest, reason = decide(cfg, diff, state, now, baseline=baseline)
+    msg = compose(diff, alerts, cfg, doc, digest, now, baseline=baseline)
 
     if args.dry_run:
         print("Would %s (%s)." % ("send" if send else "not send", reason))
@@ -349,12 +461,21 @@ def main(argv=None):
     A.apply_state(state, alerts, diff, notified=sent, now=now)
     if sent:
         state["last_sent"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        if digest:
+        if digest or baseline:
+            # A baseline stamps the digest day too. It already lists everything
+            # open, which is exactly what the weekly summary would say - sending
+            # both on day one is the repetition this whole design avoids.
             state["last_digest"] = now.strftime("%Y-%m-%d")
         hist = state.get("history") or []
         hist.insert(0, {"when": state["last_sent"], "title": msg["title"], "summary": msg["summary"],
                         "channels": [n.split(" ")[0].rstrip(".").lower() for n in notes],
-                        "new": len(diff["new"]), "worse": len(diff["worse"]), "cleared": len(diff["cleared"]),
+                        # A baseline reports 0 new: nothing about it was news, and
+                        # counting 39 "new" in the history would make the console's
+                        # own record of alerting disagree with the message it sent.
+                        "new": 0 if baseline else len(diff["new"]),
+                        "worse": 0 if baseline else len(diff["worse"]),
+                        "cleared": 0 if baseline else len(diff["cleared"]),
+                        "baseline": bool(baseline),
                         "open": len(alerts)})
         state["history"] = hist[:20]
     save_json(state_path, state)
