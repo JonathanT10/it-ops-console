@@ -409,6 +409,57 @@ def main():
           code == 0 and "starting point - nothing open" in txt
           and "Alerts are connected and nothing is firing." in txt)
 
+    # -- 15. a corrected key is not an event ---------------------------------- #
+    # v1.7.5 fixed two alert keys that could not tell two findings apart. A key
+    # is an identifier, not a fact about the tenant - so the morning after the
+    # upgrade must not announce that things cleared and things appeared. This
+    # is the whole reason alerts carry the key they used to have.
+    tmp2 = tempfile.mkdtemp(prefix="notify-mig-")
+    ini2 = os.path.join(tmp2, "alerts.ini")
+    aj2 = os.path.join(tmp2, "alerts.json")
+    st2 = os.path.join(tmp2, "alerts-state.json")
+    base2 = ["--config", ini2, "--alerts", aj2, "--state", st2]
+    write_ini(ini2, webhook=url)
+
+    old = alert("identity/app_credential_expired/app-9/onedrive", "critical", tab="identity",
+                title="Expired app credential: OneDrive Sync")
+    write_alerts(aj2, [old])
+    Webhook.posts = []
+    code, out = run(base2)                       # the baseline, under the old key
+    check("corrected key: the pre-upgrade run sends its starting point", code == 0)
+
+    # Now the same two credentials, keyed properly, each remembering the shared
+    # key they used to have.
+    fixed = []
+    for cid, name in (("cred-a", "onedrive"), ("cred-b", "onedrive")):
+        a = alert("identity/app_credential_expired/app-9/%s" % cid, "critical", tab="identity",
+                  title="Expired app credential: OneDrive Sync")
+        a["legacy_key"] = "identity/app_credential_expired/app-9/onedrive"
+        fixed.append(a)
+    write_alerts(aj2, fixed)
+    Webhook.posts = []
+    code, out = run(base2)
+    check("corrected key: it says what it did, in plain words",
+          "Carried 1 alert onto a corrected key" in out)
+    # One message, and it must say exactly one thing: the credential that was
+    # never trackable is new. The one already told is carried, not re-told, and
+    # nothing cleared - because nothing cleared.
+    check("corrected key: exactly one message", len(Webhook.posts) == 1)
+    txt = card_text(Webhook.posts[-1]) if Webhook.posts else ""
+    check("corrected key: it reports 1 new, not 2",
+          Webhook.posts and Webhook.posts[-1]["attachments"][0]["content"]["body"][0]["text"]
+          == "IT Ops Console: 1 new")
+    check("corrected key: nothing is reported as cleared", txt and "cleared" not in txt.lower())
+    check("corrected key: the credential already told is not told again",
+          txt.count("OneDrive Sync") == 1)
+    check("corrected key: and it is not a second starting point",
+          txt and "starting point" not in txt.lower())
+    state_now = json.load(open(st2))
+    check("corrected key: the state file now holds both credentials separately",
+          len(state_now.get("alerts") or {}) == 2)
+    check("corrected key: and the old shared key is gone",
+          "identity/app_credential_expired/app-9/onedrive" not in (state_now.get("alerts") or {}))
+
     # -- 13. clean() ---------------------------------------------------------- #
     check("clean: markdown link syntax broken up", notify.clean("[x](http://evil)") == "[x] (http://evil)")
 

@@ -1047,6 +1047,126 @@ def test_alerts_catalog_and_config(tmp):
           and A.rule_setting_text(A.RULES_BY_KEY["security.admin_without_mfa"], True) == "on")
 
 
+def test_alert_keys_are_unique():
+    """A key is what the state file uses to say 'this is the same alert as
+    yesterday'. Two alerts sharing one key is not cosmetic: the state dict is
+    built with a comprehension, so the second silently overwrites the first and
+    can never be tracked, told apart, or cleared on its own. A real tenant
+    showed 41 alerts firing and 35 keys - six that could never be followed.
+
+    Nothing asserted this before, which is exactly why it went unnoticed."""
+    models, feeds = _sample_models()
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = A.load_config(os.path.join(here, "alerts.example.ini"))
+    fired = A.evaluate(cfg, models, feeds, now=parse_ts("2026-09-02T12:00:00Z"))
+    keys = [a["key"] for a in fired]
+    dupes = sorted({k for k in keys if keys.count(k) > 1})
+    check("keys: every fired alert has a key of its own", not dupes)
+    check("keys: and the state file can therefore hold every one of them",
+          len({a["key"] for a in fired}) == len(fired))
+
+    # -- the two shapes that actually collided ---------------------------- #
+    # Five roles removed from one person in one sync: same timestamp, same
+    # category, same kind, same person - and the ROLE, the only thing that
+    # differs, lived in the detail and never reached the key.
+    ts = "2026-09-01T07:00:00Z"
+    roles = ["Exchange Administrator", "Teams Administrator", "SharePoint Administrator",
+             "Intune Administrator", "Helpdesk Administrator"]
+    ch = {"events": [{"ts": ts, "category": "Role assignments", "kind": "removed",
+                      "item": "Tanner Jones", "detail": r} for r in roles],
+          "snapshot_count": 2, "first": ts, "last": ts}
+    m2 = dict(models); m2["changes"] = ch
+    fired2 = A.evaluate(cfg, m2, feeds, now=parse_ts("2026-09-01T12:00:00Z"))
+    roles_fired = _by_rule(fired2, "role_assignments")
+    check("keys: five role removals for one person at one moment fire five alerts",
+          len(roles_fired) == 5)
+    check("keys: and each one has its own key",
+          len({a["key"] for a in roles_fired}) == 5)
+    check("keys: the role name is what separates them",
+          all(any(r in a["key"] for r in roles) for a in roles_fired))
+    check("keys: and each carries the key it used to have, so the fix is not a change",
+          all(a.get("legacy_key") and a["legacy_key"] != a["key"] for a in roles_fired))
+    check("keys: those old keys were all the same one - that was the bug",
+          len({a.get("legacy_key") for a in roles_fired}) == 1
+          and all(a.get("legacy_key") for a in roles_fired))
+
+    # Two credentials on one app with the same display name. Graph gives each
+    # a keyId; the alert used to key on the name.
+    ident = dict(models["identity"])
+    ident["applications"] = [{
+        "Name": "OneDrive Sync", "AppId": "app-guid-9",
+        "Credentials": [
+            {"Type": "Client secret", "Id": "cred-a", "Name": "onedrive",
+             "ExpiresUtc": "2026-08-01T00:00:00Z"},
+            {"Type": "Client secret", "Id": "cred-b", "Name": "onedrive",
+             "ExpiresUtc": "2026-08-20T00:00:00Z"},
+        ]}]
+    m3 = dict(models); m3["identity"] = ident; m3["security"] = dict(models["security"])
+    fired3 = A.evaluate(cfg, m3, feeds, now=parse_ts("2026-09-01T12:00:00Z"))
+    creds = _by_rule(fired3, "app_credential_expired")
+    check("keys: two same-named credentials on one app fire two alerts", len(creds) == 2)
+    check("keys: with two different keys", len({a["key"] for a in creds}) == 2)
+    check("keys: keyed on the credential id, not its display name",
+          len(creds) == 2 and all(a["key"].endswith("/cred-a") or a["key"].endswith("/cred-b")
+                                  for a in creds))
+    check("keys: and both remember the single key they used to share",
+          len({a.get("legacy_key") for a in creds}) == 1
+          and all(a.get("legacy_key") for a in creds))
+
+    # A feed too old to carry keyId must still separate them.
+    for c in ident["applications"][0]["Credentials"]:
+        del c["Id"]
+    fired4 = A.evaluate(cfg, m3, feeds, now=parse_ts("2026-09-01T12:00:00Z"))
+    old_creds = _by_rule(fired4, "app_credential_expired")
+    check("keys: a feed with no credential id still gives them separate keys",
+          len({a["key"] for a in old_creds}) == 2)
+
+
+def test_key_migration_is_not_a_change():
+    """Correcting a key must not be reported as the world changing.
+
+    Without this, the first run after the fix says four critical findings
+    cleared and four appeared, on a morning when nothing happened at all -
+    the same false wall the baseline message exists to prevent, arriving
+    through a different door."""
+    rule = A.RULES_BY_KEY["identity.app_credential_expired"]
+    app = {"Name": "OneDrive Sync", "AppId": "app-9"}
+    creds = [{"Type": "Client secret", "Id": "cred-a", "Name": "onedrive",
+              "ExpiresUtc": "2026-08-01T00:00:00Z"},
+             {"Type": "Client secret", "Id": "cred-b", "Name": "onedrive",
+              "ExpiresUtc": "2026-08-20T00:00:00Z"}]
+    alerts = [A._alert(rule, A._cred_key(app, c), "Expired app credential: OneDrive Sync",
+                       legacy_suffix=A._cred_legacy_key(app, c)) for c in creds]
+
+    # A state file written by the previous release: one entry, the shared key.
+    old_key = alerts[0].get("legacy_key") or "<no legacy key - the fix is not in>"
+    state = A.empty_state()
+    state["last_sent"] = "2026-09-01T07:00:00Z"
+    state["alerts"] = {old_key: {"severity": "critical", "tab": "identity",
+                                 "title": "Expired app credential: OneDrive Sync",
+                                 "transient": False, "first_seen": "2026-08-02T07:00:00Z",
+                                 "last_seen": "2026-09-01T07:00:00Z", "notified": True}}
+
+    before = A.diff_state(alerts, state)
+    check("migration: without it the old key looks cleared",
+          len(before["cleared"]) == 1 and before["cleared"][0].get("key") == old_key)
+    check("migration: and both new keys look new", len(before["new"]) == 2)
+
+    moved = A.migrate_keys(state, alerts)
+    check("migration: one entry is carried across", moved == 1)
+    after = A.diff_state(alerts, state)
+    check("migration: nothing is reported as cleared", after["cleared"] == [])
+    check("migration: the credential already told is not re-told",
+          len(after["new"]) == 1 and len(after["still"]) == 1)
+    check("migration: and the one that could never be tracked is now new - correctly",
+          len(after["new"]) == 1 and after["new"][0]["key"].endswith("/cred-b"))
+    check("migration: the first-seen date survives the move",
+          (state["alerts"].get(alerts[0]["key"]) or {}).get("first_seen") == "2026-08-02T07:00:00Z")
+    check("migration: running it again does nothing", A.migrate_keys(state, alerts) == 0)
+    check("migration: it does not make this look like a first message",
+          A.empty_state().get("last_sent") != state.get("last_sent"))
+
+
 def test_alerts_rules():
     models, feeds = _sample_models()
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1527,6 +1647,8 @@ def main():
         test_refresh_render()
         test_alerts_catalog_and_config(tmp)
         test_alerts_rules()
+        test_alert_keys_are_unique()
+        test_key_migration_is_not_a_change()
         test_overview_panel()
         test_alerts_state()
         test_alerts_page()

@@ -517,9 +517,12 @@ Check 'an un-elevated run with a per-account copy does not offer a pip that woul
 Check 'the retry hint it prints is the one that actually works' (
     $setupText -like '*PYTHONNOUSERSITE=1; & ""$python"" -m pip install ""pysnmp>=7.1""*')
 
-# ---- the twin in check-setup.ps1 cannot drift ----------------------------- #
-# The two scripts are separate entry points with no shared module, so the helper
-# is duplicated on purpose. This is what stops the copies from diverging.
+# ---- the three copies of the helper cannot drift -------------------------- #
+# setup.ps1, check-setup.ps1 and schedule-refresh.ps1 are separate entry points
+# with no shared module, so the helper is duplicated on purpose. This is what
+# stops the copies from diverging. schedule-refresh.ps1 joined them in v1.7.5:
+# it used to ask the same question a different way (python -s), which is two
+# mechanisms for one question and exactly the kind of drift this guards.
 $csPath = Join-Path $repo 'check-setup.ps1'
 function Get-FnText { param([string]$Path, [string]$Name)
     $a = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
@@ -528,20 +531,58 @@ function Get-FnText { param([string]$Path, [string]$Name)
     if ($f.Count) { return "$($f[0].Extent.Text)" }
     return ''
 }
+$srPath  = Join-Path $repo 'schedule-refresh.ps1'
 $inSetup = Get-FnText $setup 'Test-PythonHasModule'
 $inCheck = Get-FnText $csPath 'Test-PythonHasModule'
+$inSched = Get-FnText $srPath 'Test-PythonHasModule'
 Check 'check-setup.ps1 carries the same helper' ([bool]$inCheck)
+Check 'schedule-refresh.ps1 carries the same helper' ([bool]$inSched)
 # -ceq, not -eq: PowerShell string comparison is case-INSENSITIVE by default,
 # and this guard quietly accepted a copy that differed only in case until a
 # mutation proved it. Same trap that made Compare-SuiteVersion always return 0.
 Check 'and it is byte-identical to setup.ps1 - no drift' (
     $inSetup -ceq $inCheck -and $inSetup.Length -gt 200)
+Check 'and so is schedule-refresh.ps1 - no drift' (
+    $inSetup -ceq $inSched -and $inSched.Length -gt 200)
 $csText = Get-Content $csPath -Raw
 Check 'check-setup asks both questions too' (
     $csText -like "*Test-PythonHasModule `$py 'pysnmp'*" -and
     $csText -like "*Test-PythonHasModule `$py 'pysnmp' -MachineWide*")
 Check 'and calls out the every-morning failure when the schedule is unattended' (
     $csText -like '*installed for $who ONLY*' -and $csText -like '*runs as SYSTEM*')
+
+# ---- schedule-refresh's printer warning must not hand out the broken fix --- #
+# The bug this guards against cost a week on a real machine: the script asked
+# the right question with `python -s`, then told the person to run pip "in a
+# normal PowerShell window" - which installs into their own profile, which is
+# the very thing the probe had just found wrong. It printed the cause and the
+# cause's cause as if it were the cure.
+$srText = Get-Content $srPath -Raw
+Check 'schedule-refresh asks both questions' (
+    $srText -like "*Test-PythonHasModule `$pyExe 'pysnmp'*" -and
+    $srText -like "*Test-PythonHasModule `$pyExe 'pysnmp' -MachineWide*")
+Check 'schedule-refresh no longer probes with python -s' (
+    $srText -notlike "*-Flags @('-s')*")
+$remedy = @($srText -split "`r?`n" | Where-Object { $_ -like '*pip install*pysnmp*' })
+Check 'it gives exactly one pysnmp remedy' ($remedy.Count -eq 1)
+Check 'and that remedy sets PYTHONNOUSERSITE' (
+    $remedy.Count -eq 1 -and $remedy[0] -like '*PYTHONNOUSERSITE=1*')
+Check 'and never tells anyone to use a normal PowerShell window' (
+    $srText -notlike '*normal PowerShell window*')
+# Not a bare -like on the whole file: the helper's own comment quotes that
+# phrase, so a file-wide match passes even when the remedy has been reverted.
+# Assert on the lines that a person actually sees.
+$adminLines = @($srText -split "`r?`n" | Where-Object {
+    ($_ -like '*Write-Warning*' -or $_ -like '*Write-Host*') -and $_ -like '*Run as administrator*' })
+Check 'and it names the window that does work, on a line it prints' (
+    $adminLines.Count -ge 1)
+# It must not assert the account case it has not established.
+$mineClaim = @($srText -split "`r?`n" | Where-Object {
+    $_ -like '*Write-Warning*' -and $_ -like '*YOUR account only*' })
+Check 'the "your account only" wording appears only under the check that proves it' (
+    $mineClaim.Count -eq 1)
+Check 'and there is a separate line for "not installed at all"' (
+    $srText -like '*pysnmp) is not installed*')
 
 Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue

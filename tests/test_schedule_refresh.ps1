@@ -202,6 +202,9 @@ $r = Run-Sched "-Mode unattended -Time 06:30 -Python $python -TenantId $tid -Cli
 Check 'exit 0' ($r.Code -eq 0)
 Check 'one certificate still' (@(Get-Content $certs -Raw | ConvertFrom-Json).Count -eq 1)
 Check 'task present' ($null -ne $r.Task -and $r.Task.Principal.UserId -eq 'SYSTEM')
+# Nothing was re-made, so there is nothing to upload: saying so again would
+# send someone to Entra to do a job already done.
+Check 'no upload step on a re-run that reused the certificate' ($r.Text -notlike '*NEW certificate*')
 
 Write-Host ''
 Write-Host '-- 9. certificate close to expiry: a new one is made on re-run'
@@ -213,6 +216,7 @@ Check 'exit 0' ($r.Code -eq 0)
 Check 'a second certificate was made' (@(Get-Content $certs -Raw | ConvertFrom-Json).Count -eq 2)
 Check 'ini points at the new one' ($r.Ini['signin.certificate_thumbprint'] -like 'C002*')
 Check 'the human step is shown again (new .cer to upload)' ((Get-Content (Join-Path $root 'IT-Ops-Console-refresh.cer') -Raw) -like 'PUBLIC C002*')
+Check 'and it is said in words, not just written to a file' ($r.Text -like '*NEW certificate*')
 
 Write-Host ''
 Write-Host '-- 10. unattended -> off: SYSTEM task removed, app details kept for next time'
@@ -293,6 +297,39 @@ $r = Run-Sched "-Mode while-signed-in -Time 07:00 -Python $python"
 Check '15 a file that never said anything defaults to yes' ($r.Ini['updates.check'] -eq 'yes')
 Check '15 and the section is written, so it can be found and changed' (
     (Get-Content $ini -Raw) -like '*[[]updates[]]*' -and (Get-Content $ini -Raw) -like '*Set this to no to stop it*')
+
+Write-Host ''
+Write-Host '-- 16. a SECOND computer: the app already exists, but its certificate does not'
+# The case nothing covered, which is why the bug survived. Passing both IDs says
+# "the app is already registered" - it does NOT say this computer's certificate
+# is on it, and a machine with no certificate always makes a new one. Until
+# v1.7.5 the entire human block, INCLUDING the upload step and the pause that
+# waits for it, sat inside "if we were not given the IDs". So the obvious
+# command for a second machine skipped the one step still outstanding and went
+# straight to the sign-in test with a certificate Entra had never seen:
+# AADSTS700027, nothing scheduled, and not one word about uploading anything.
+Remove-Item $certs -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $root 'IT-Ops-Console-refresh.cer') -Force -ErrorAction SilentlyContinue
+Remove-Item $ini -Force -ErrorAction SilentlyContinue
+$r = Run-Sched "-Mode unattended -Time 06:30 -Python $python -TenantId $tid -ClientId $cid" -Graph 'app-ok'
+Check '16 exit 0' ($r.Code -eq 0)
+Check '16 a certificate was made for this computer' (@(Get-Content $certs -Raw | ConvertFrom-Json).Count -eq 1)
+Check '16 it says the certificate is new and must be uploaded' (
+    $r.Text -like '*NEW certificate*' -and $r.Text -like '*Upload certificate*')
+# Not a bare match on the file name: the "certificate ready" line already names
+# it, so a whole-text match passes even with the upload step gone.
+Check '16 and it names the file as the thing to pick' ($r.Text -like '*3. Pick*IT-Ops-Console-refresh.cer*')
+Check '16 and warns off the two ways to break the other computer' (
+    $r.Text -like '*Do NOT remove a certificate another computer is using*' -and
+    $r.Text -like '*Do NOT create a client*')
+Check '16 and says all of it BEFORE trying the sign-in, not after it fails' (
+    $r.Text.IndexOf('NEW certificate') -ge 0 -and
+    $r.Text.IndexOf('NEW certificate') -lt $r.Text.IndexOf('signed in as the app'))
+Check '16 and having said it, the run still schedules the task' (
+    $null -ne $r.Task -and $r.Task.Principal.UserId -eq 'SYSTEM')
+# It must not ask a second computer to register a second app.
+Check '16 it does not re-run the Global Administrator interview' (
+    $r.Text -notlike '*ONE-TIME STEP FOR A GLOBAL ADMINISTRATOR*' -and $r.Text -notlike '*New registration*')
 
 Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
