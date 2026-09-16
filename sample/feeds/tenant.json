@@ -335,6 +335,7 @@
       "Credentials": [
         {
           "Type": "Client secret",
+          "Id": "cred-0000-0000-0000-0000-000000000000",
           "Name": "sync secret",
           "ExpiresUtc": "2026-08-17T01:39:56Z"
         }
@@ -348,6 +349,7 @@
       "Credentials": [
         {
           "Type": "Client secret",
+          "Id": "cred-0001-0000-0000-0000-000000000010",
           "Name": "main",
           "ExpiresUtc": "2027-06-25T01:39:56Z"
         }
@@ -361,6 +363,7 @@
       "Credentials": [
         {
           "Type": "Certificate",
+          "Id": "cred-0002-0000-0000-0000-000000000020",
           "Name": "signing cert",
           "ExpiresUtc": "2026-11-12T01:39:56Z"
         }
@@ -374,6 +377,7 @@
       "Credentials": [
         {
           "Type": "Client secret",
+          "Id": "cred-0003-0000-0000-0000-000000000030",
           "Name": "prod",
           "ExpiresUtc": "2026-09-19T01:39:56Z"
         }
