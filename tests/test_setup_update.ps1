@@ -42,7 +42,7 @@ function Check { param([string]$Label, [bool]$Cond)
 # what people actually run.
 $setup = Join-Path $repo 'setup.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($setup, [ref]$null, [ref]$null)
-$wanted = @('Get-BundleFileList', 'Get-HeldFile', 'Copy-BundleOverTop', 'Install-FromBundle', 'Get-InstalledSuiteVersion')
+$wanted = @('Get-BundleFileList', 'Get-HeldFile', 'Copy-BundleOverTop', 'Install-FromBundle', 'Get-InstalledSuiteVersion', 'Test-PythonHasModule')
 $defs = @{}
 foreach ($f in $ast.FindAll({ param($n)
     $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
@@ -53,8 +53,8 @@ foreach ($name in $wanted) {
     . ([scriptblock]::Create($defs[$name]))
 }
 Check 'the functions come from the shipped setup.ps1' (
-    @('Get-BundleFileList','Get-HeldFile','Copy-BundleOverTop','Install-FromBundle','Get-InstalledSuiteVersion' |
-      Where-Object { Get-Command $_ -ErrorAction SilentlyContinue }).Count -eq 5)
+    @('Get-BundleFileList','Get-HeldFile','Copy-BundleOverTop','Install-FromBundle','Get-InstalledSuiteVersion','Test-PythonHasModule' |
+      Where-Object { Get-Command $_ -ErrorAction SilentlyContinue }).Count -eq 6)
 
 function New-Bundle {
     # what a release bundle carries for one tool: code and *.example.ini only
@@ -413,6 +413,135 @@ Check 'and how to change it if that is what you came for' (
     $updateBranchText -like '*schedule-refresh.ps1*' -and $updateBranchText -like '*Run with PowerShell*')
 Check 'a first install still asks the question' (
     (Get-Content $setup -Raw) -like '*& $scheduler @schedArgs*')
+
+# --------------------------------------------------------------------------- #
+# "Is the SNMP library there?" is TWO questions, and setup used to ask the easy
+# one. A per-account pysnmp is on sys.path for an elevated prompt too, because
+# elevation changes what you may do, not who you are - so pip reported
+# "Requirement already satisfied", installed nothing machine-wide, and the
+# import check (run as that same person) then let setup announce "installed for
+# the whole computer" on a laptop where SYSTEM could not see it at all.
+# --------------------------------------------------------------------------- #
+Write-Host ''
+Write-Host '-- the SNMP library check asks about the account that actually runs the task'
+
+# A stub interpreter that models the real rule: with the user site hidden you
+# can only see a machine-wide install; otherwise you see either.
+$stub = Join-Path $work 'py-stub'
+$null = New-Item -ItemType Directory -Path $work -Force
+Set-Content -Path $stub -Encoding UTF8 -Value @'
+#!/bin/sh
+if [ -n "$PYTHONNOUSERSITE" ]; then
+  if [ -n "$STUB_SNMP_MACHINE" ]; then exit 0; else exit 1; fi
+else
+  if [ -n "$STUB_SNMP_MACHINE" ] || [ -n "$STUB_SNMP_USER" ]; then exit 0; else exit 1; fi
+fi
+'@
+if (-not $onWindows) { & chmod +x $stub }
+
+function Set-StubState { param([bool]$User, [bool]$Machine)
+    if ($User) { $env:STUB_SNMP_USER = '1' } else { Remove-Item Env:\STUB_SNMP_USER -ErrorAction SilentlyContinue }
+    if ($Machine) { $env:STUB_SNMP_MACHINE = '1' } else { Remove-Item Env:\STUB_SNMP_MACHINE -ErrorAction SilentlyContinue }
+}
+
+if ($onWindows) {
+    Write-Host '   (skipped on Windows - the stub is a /bin/sh script)'
+} else {
+    # 1. the state that caused the bug: installed for the person, not the computer
+    Set-StubState -User $true -Machine $false
+    Check 'a per-account copy is visible to this account' (
+        (Test-PythonHasModule $stub 'pysnmp') -eq $true)
+    Check 'and is CORRECTLY invisible to the account a scheduled task runs as' (
+        (Test-PythonHasModule $stub 'pysnmp' -MachineWide) -eq $false)
+
+    # 2. a real machine-wide install answers yes to both
+    Set-StubState -User $false -Machine $true
+    Check 'a machine-wide copy is visible both ways' (
+        (Test-PythonHasModule $stub 'pysnmp') -eq $true -and
+        (Test-PythonHasModule $stub 'pysnmp' -MachineWide) -eq $true)
+
+    # 3. nothing installed is no, both ways
+    Set-StubState -User $false -Machine $false
+    Check 'a missing library is no to both questions' (
+        (Test-PythonHasModule $stub 'pysnmp') -eq $false -and
+        (Test-PythonHasModule $stub 'pysnmp' -MachineWide) -eq $false)
+
+    # 4. an interpreter that does not exist must not throw
+    Check 'a python that is not there answers no rather than blowing up' (
+        (Test-PythonHasModule (Join-Path $work 'no-such-python') 'pysnmp') -eq $false)
+
+    # 5. the probe must not leak its blindfold into the rest of the run - a
+    #    leaked PYTHONNOUSERSITE would silently change how every later python
+    #    call behaves, including the collectors.
+    Remove-Item Env:\PYTHONNOUSERSITE -ErrorAction SilentlyContinue
+    $null = Test-PythonHasModule $stub 'pysnmp' -MachineWide
+    Check 'the machine-wide probe leaves no PYTHONNOUSERSITE behind' (
+        $null -eq [Environment]::GetEnvironmentVariable('PYTHONNOUSERSITE'))
+    $env:PYTHONNOUSERSITE = 'keep-me'
+    $null = Test-PythonHasModule $stub 'pysnmp' -MachineWide
+    Check 'and restores one that was already set' (
+        [Environment]::GetEnvironmentVariable('PYTHONNOUSERSITE') -eq 'keep-me')
+    Remove-Item Env:\PYTHONNOUSERSITE -ErrorAction SilentlyContinue
+    Set-StubState -User $false -Machine $false
+}
+
+# ---- what setup DOES with the two answers --------------------------------- #
+$setupText = Get-Content $setup -Raw
+# EVERY claim, not just one of them. setup.ps1 says "whole computer" in two
+# places and an earlier version of this check passed while one of them had been
+# switched to the easy answer - the surviving one satisfied the regex.
+$wholeLines = @()
+$setupLines = Get-Content $setup
+for ($i = 0; $i -lt $setupLines.Count; $i++) {
+    # Write-Host lines only. The helper's own comment quotes that sentence
+    # while explaining the bug, and counting prose as a claim made this check
+    # fail against correct code.
+    if ($setupLines[$i] -like '*installed for the whole computer*' -and
+        "$($setupLines[$i])".Trim() -like 'Write-Host*') {
+        $guard = ''
+        for ($j = $i - 1; $j -ge 0 -and -not $guard; $j--) {
+            if ("$($setupLines[$j])".Trim()) { $guard = "$($setupLines[$j])" }
+        }
+        $wholeLines += [pscustomobject]@{ Line = $i + 1; Guard = $guard }
+    }
+}
+Check 'setup claims "whole computer" in the places we expect' ($wholeLines.Count -ge 2)
+Check 'and EVERY one of those claims is guarded by the machine-wide answer' (
+    $wholeLines.Count -ge 2 -and
+    @($wholeLines | Where-Object { $_.Guard -notlike '*$snmpEveryone*' }).Count -eq 0)
+Check 'the elevated install hides the per-account copy first, or pip no-ops' (
+    $setupText -like "*if (`$elevated) { `$env:PYTHONNOUSERSITE = '1' }*")
+Check 'an un-elevated run with a per-account copy does not offer a pip that would do nothing' (
+    $setupText -like '*$snmpMine -and -not $elevated*' -and
+    $setupText -like '*Re-run this setup from a window opened with "Run as administrator".*')
+Check 'the retry hint it prints is the one that actually works' (
+    $setupText -like '*PYTHONNOUSERSITE=1; & ""$python"" -m pip install ""pysnmp>=7.1""*')
+
+# ---- the twin in check-setup.ps1 cannot drift ----------------------------- #
+# The two scripts are separate entry points with no shared module, so the helper
+# is duplicated on purpose. This is what stops the copies from diverging.
+$csPath = Join-Path $repo 'check-setup.ps1'
+function Get-FnText { param([string]$Path, [string]$Name)
+    $a = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+    $f = @($a.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $Name }, $true))
+    if ($f.Count) { return "$($f[0].Extent.Text)" }
+    return ''
+}
+$inSetup = Get-FnText $setup 'Test-PythonHasModule'
+$inCheck = Get-FnText $csPath 'Test-PythonHasModule'
+Check 'check-setup.ps1 carries the same helper' ([bool]$inCheck)
+# -ceq, not -eq: PowerShell string comparison is case-INSENSITIVE by default,
+# and this guard quietly accepted a copy that differed only in case until a
+# mutation proved it. Same trap that made Compare-SuiteVersion always return 0.
+Check 'and it is byte-identical to setup.ps1 - no drift' (
+    $inSetup -ceq $inCheck -and $inSetup.Length -gt 200)
+$csText = Get-Content $csPath -Raw
+Check 'check-setup asks both questions too' (
+    $csText -like "*Test-PythonHasModule `$py 'pysnmp'*" -and
+    $csText -like "*Test-PythonHasModule `$py 'pysnmp' -MachineWide*")
+Check 'and calls out the every-morning failure when the schedule is unattended' (
+    $csText -like '*installed for $who ONLY*' -and $csText -like '*runs as SYSTEM*')
 
 Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
