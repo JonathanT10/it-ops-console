@@ -64,12 +64,23 @@ class Rule:
         return "%s.%s" % (self.tab, self.id)
 
 
-def _alert(rule, key_suffix, title, detail="", action="", severity=None, transient=False):
+def _full_key(rule, suffix):
+    return "%s/%s/%s" % (rule.tab, rule.id, suffix) if suffix else "%s/%s" % (rule.tab, rule.id)
+
+
+def _alert(rule, key_suffix, title, detail="", action="", severity=None,
+           transient=False, legacy_suffix=None):
     """Every alert has the same shape. `key` is what makes 'the same alert
     tomorrow' the same alert; `transient` marks an event (something that
-    happened) as opposed to a state (something that is the case)."""
-    return {
-        "key": "%s/%s/%s" % (rule.tab, rule.id, key_suffix) if key_suffix else "%s/%s" % (rule.tab, rule.id),
+    happened) as opposed to a state (something that is the case).
+
+    `legacy_suffix` is the key this alert had in an earlier release. It exists
+    only so a key CORRECTION does not read as a change in the world: without
+    it the state file sees the old key vanish and a new one appear, and the
+    next message announces something cleared and something new when nothing
+    whatsoever happened. See migrate_keys()."""
+    out = {
+        "key": _full_key(rule, key_suffix),
         "tab": rule.tab,
         "rule": rule.id,
         "severity": severity or rule.severity,
@@ -78,6 +89,11 @@ def _alert(rule, key_suffix, title, detail="", action="", severity=None, transie
         "action": str(action or ""),
         "transient": bool(transient),
     }
+    if legacy_suffix is not None:
+        legacy = _full_key(rule, legacy_suffix)
+        if legacy != out["key"]:
+            out["legacy_key"] = legacy
+    return out
 
 
 def _days_until(ts_text, now):
@@ -108,6 +124,28 @@ def ev_ca_gap_warning(ctx, rule, value):
                    next_step("ca-gap", g.get("Id"))) for g in _ca_gaps(ctx, "warning")]
 
 
+def _cred_key(app, cred):
+    """What makes 'the same credential tomorrow' the same credential.
+
+    It used to be the app id plus the credential's DISPLAY NAME, which is not
+    unique: one app registration can hold two secrets both called "onedrive".
+    The two then shared one key, the state file could only ever hold one of
+    them, and if one expired while the other did not, nothing could tell them
+    apart. Graph gives every credential a keyId - use it. Older feeds, and the
+    sample data, do not carry one, so fall back to something that at least
+    separates two credentials on the same app: type, name and expiry date."""
+    cid = cred.get("Id")
+    if cid:
+        return "%s/%s" % (app.get("AppId"), cid)
+    return "%s/%s/%s/%s" % (app.get("AppId"), cred.get("Type"), cred.get("Name"),
+                            str(cred.get("ExpiresUtc") or "")[:10])
+
+
+def _cred_legacy_key(app, cred):
+    """The key this credential had before the fix above."""
+    return "%s/%s" % (app.get("AppId"), cred.get("Name"))
+
+
 def _credentials(ctx):
     ident = ctx.models.get("identity")
     if not ident:
@@ -122,11 +160,12 @@ def ev_app_credential_expired(ctx, rule, value):
     for app, cred in _credentials(ctx):
         left = _days_until(cred.get("ExpiresUtc"), ctx.now)
         if left is not None and left < 0:
-            out.append(_alert(rule, "%s/%s" % (app.get("AppId"), cred.get("Name")),
+            out.append(_alert(rule, _cred_key(app, cred),
                               "Expired app credential: %s" % app.get("Name"),
                               "%s '%s' expired %s" % (cred.get("Type"), cred.get("Name"),
                                                       str(cred.get("ExpiresUtc"))[:10]),
-                              next_step("app-credential")))
+                              next_step("app-credential"),
+                              legacy_suffix=_cred_legacy_key(app, cred)))
     return out
 
 
@@ -135,12 +174,13 @@ def ev_app_credential_expiring(ctx, rule, value):
     for app, cred in _credentials(ctx):
         left = _days_until(cred.get("ExpiresUtc"), ctx.now)
         if left is not None and 0 <= left <= value:
-            out.append(_alert(rule, "%s/%s" % (app.get("AppId"), cred.get("Name")),
+            out.append(_alert(rule, _cred_key(app, cred),
                               "App credential expires in %d day%s: %s"
                               % (int(left), "" if int(left) == 1 else "s", app.get("Name")),
                               "%s '%s' expires %s" % (cred.get("Type"), cred.get("Name"),
                                                       str(cred.get("ExpiresUtc"))[:10]),
-                              next_step("app-credential")))
+                              next_step("app-credential"),
+                              legacy_suffix=_cred_legacy_key(app, cred)))
     return out
 
 
@@ -342,12 +382,23 @@ def _recent_events(ctx, categories):
 
 
 def _change_alerts(ctx, rule, severity):
+    """The key has to carry everything that makes two events different.
+
+    It used to be timestamp, category, kind and item - and for a role change
+    the "item" is the PERSON, while the role itself is only in the detail. One
+    person losing five roles in one sync is five events with one key, so four
+    of them could never be tracked and, if one came back, nothing could say
+    which. The detail is the missing piece; it is capped because a key is an
+    identifier, not a place to store prose."""
     out = []
     for e in _recent_events(ctx, CHANGE_CATEGORIES[rule.id]):
-        out.append(_alert(rule, "%s/%s/%s/%s" % (str(e["ts"])[:19], e["category"], e["kind"], e["item"]),
+        stem = "%s/%s/%s/%s" % (str(e["ts"])[:19], e["category"], e["kind"], e["item"])
+        detail = str(e.get("detail") or "")
+        out.append(_alert(rule, "%s/%s" % (stem, detail[:60]) if detail else stem,
                           "%s %s: %s" % (e["category"], e["kind"], e["item"]),
-                          e.get("detail"), next_step("change", e["category"]),
-                          severity=severity, transient=True))
+                          detail, next_step("change", e["category"]),
+                          severity=severity, transient=True,
+                          legacy_suffix=stem))
     return out
 
 
@@ -766,6 +817,30 @@ def diff_state(alerts, state):
     cleared = [dict(prev, key=key) for key, prev in known.items()
                if key not in current and not prev.get("transient") and prev.get("notified")]
     return {"new": new, "worse": worse, "cleared": cleared, "still": still}
+
+
+def migrate_keys(state, alerts):
+    """Carry state entries across a key correction, and return how many moved.
+
+    A key is an identifier, not a fact about the world. When a release fixes a
+    key that was wrong, the state file must follow it across - otherwise the
+    very next message reports the old key as CLEARED and the new one as NEW,
+    and says that four critical findings appeared and four went away on a
+    morning when nothing at all happened. That is the same false wall the
+    baseline message exists to prevent, arriving by a different door.
+
+    Safe to run every time: once an entry has moved, the old key is gone and
+    this does nothing. Alerts that never changed key carry no legacy_key and
+    are not touched."""
+    known = state.get("alerts") or {}
+    moved = 0
+    for a in alerts:
+        old = a.get("legacy_key")
+        if old and old != a.get("key") and old in known and a["key"] not in known:
+            known[a["key"]] = known.pop(old)
+            moved += 1
+    state["alerts"] = known
+    return moved
 
 
 def apply_state(state, alerts, diff, notified, now=None):
