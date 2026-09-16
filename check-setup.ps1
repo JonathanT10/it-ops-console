@@ -241,8 +241,10 @@ function Test-PythonHasModule {
        see it at all. It is the same shape as every other bug in this suite:
        the check asked an easier question than the thing it was guarding.
 
-       A twin of this function lives in check-setup.ps1. tests/test_setup_update.ps1
-       asserts the two bodies stay identical. #>
+       This function is duplicated in setup.ps1, check-setup.ps1 and
+       schedule-refresh.ps1 - the three places that ask this question, and
+       three separate entry points with no shared module between them.
+       tests/test_setup_update.ps1 asserts all three bodies stay identical. #>
     param([string]$Exe, [string]$Module, [switch]$MachineWide)
     $had = [Environment]::GetEnvironmentVariable('PYTHONNOUSERSITE')
     if ($MachineWide) { $env:PYTHONNOUSERSITE = '1' }

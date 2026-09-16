@@ -434,6 +434,13 @@ def main(argv=None):
     alerts = doc.get("Alerts") or []
     state_path = args.state or os.path.join(os.path.dirname(os.path.abspath(args.alerts)), "alerts-state.json")
     state = load_json(state_path, None) or A.empty_state()
+    # Before anything is compared: if this release corrected a key, move the
+    # state entry onto it. Otherwise the comparison below is between two
+    # different naming schemes and reports a change that did not happen.
+    moved = A.migrate_keys(state, alerts)
+    if moved:
+        print("Carried %d alert%s onto a corrected key (nothing changed in your tenant)."
+              % (moved, "" if moved == 1 else "s"))
 
     baseline = is_first_message(state)
     diff = A.diff_state(alerts, state)

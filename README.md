@@ -334,7 +334,15 @@ block.txt --dry-run` shows what it would do without doing it.
 
 **How it is built.** `console/alerts.py` is a catalog: one entry per rule (tab,
 label, on/off or threshold, default, severity, evaluate) that yields alerts with
-a stable key. `build.py` runs it on every build and writes `output\alerts.json`
+a key. That key has to be stable — the same finding tomorrow is the same alert —
+and it has to be *unique*, which is the harder half: it must carry everything
+that makes two findings different. Two alerts sharing a key is not cosmetic. The
+state file is a dictionary, so the second silently replaces the first and can
+never be told apart, tracked, or cleared on its own. A test asserts no two fired
+alerts share a key. When a key is corrected, the alert carries the key it used to
+have so the state moves with it — otherwise fixing a key would announce itself as
+things clearing and things appearing on a morning when nothing happened.
+`build.py` runs it on every build and writes `output\alerts.json`
 — the renderer still sends nothing and holds no credentials. `notify.py` is the
 one thing in this repository that talks to the network, and only to your webhook
 and your relay: it compares `alerts.json` with `output\alerts-state.json` (what

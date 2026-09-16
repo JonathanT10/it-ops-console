@@ -252,6 +252,50 @@ function Resolve-PythonExe {
     return $Cmd
 }
 
+# The printer collector needs pysnmp, and the daily refresh runs as the computer
+# (SYSTEM), which cannot see a library installed into one person's profile. Ask
+# both questions before scheduling anything that depends on it.
+function Test-PythonHasModule {
+    <# Can this interpreter import the module?
+
+       -MachineWide hides the invoking person's OWN site-packages, and that is
+       the only question worth asking before a scheduled task depends on it: the
+       task runs as the computer, whose profile is not this one.
+
+       This distinction is not academic. "Run as administrator" raises your
+       privileges; it does not change WHO you are, so %APPDATA%\Python stays on
+       sys.path. pip then reports "Requirement already satisfied" against a
+       per-user copy and installs nothing machine-wide - while a plain import
+       check, run as you, happily says yes. That combination let setup announce
+       "installed for the whole computer" on a machine where SYSTEM could not
+       see it at all. It is the same shape as every other bug in this suite:
+       the check asked an easier question than the thing it was guarding.
+
+       This function is duplicated in setup.ps1, check-setup.ps1 and
+       schedule-refresh.ps1 - the three places that ask this question, and
+       three separate entry points with no shared module between them.
+       tests/test_setup_update.ps1 asserts all three bodies stay identical. #>
+    param([string]$Exe, [string]$Module, [switch]$MachineWide)
+    $had = [Environment]::GetEnvironmentVariable('PYTHONNOUSERSITE')
+    if ($MachineWide) { $env:PYTHONNOUSERSITE = '1' }
+    try {
+        # cmd.exe merges the Microsoft Store stub's stderr into stdout, so a
+        # missing interpreter never surfaces as a red NativeCommandError.
+        if ($env:OS -eq 'Windows_NT') {
+            return -not ((& cmd.exe /d /c "$Exe -c ""import $Module"" 2>&1" | Out-String).Trim())
+        }
+        $null = & $Exe -c "import $Module" 2>&1
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        if ($MachineWide) {
+            if ($null -eq $had) { Remove-Item Env:\PYTHONNOUSERSITE -ErrorAction SilentlyContinue }
+            else { $env:PYTHONNOUSERSITE = $had }
+        }
+    }
+}
+
 function Get-CertByThumbprint {
     param([string]$Thumbprint)
     if (-not $Thumbprint) { return $null }
@@ -425,6 +469,27 @@ try {
                 Write-Host ''
                 if (-not $NoPrompt) { $null = Read-Host '  Press Enter when the certificate is uploaded and you have both IDs' }
             }
+            elseif ($renew) {
+                # Both IDs supplied means "the app already exists" - it does NOT
+                # mean this computer's certificate is on it. A second computer
+                # always arrives here with a certificate Entra has never seen, and
+                # the sign-in test below is the next thing that runs. Skipping the
+                # interview must not skip the one step that is still outstanding,
+                # or the run ends in AADSTS700027 having scheduled nothing and
+                # having never said what to do about it.
+                Write-Host ''
+                Write-Host '  This computer has a NEW certificate, and the app registration has not seen it yet.'
+                Write-Host '  Add it to the app you already have (about two minutes):'
+                Write-Host '   1. Open https://entra.microsoft.com > Identity > Applications > App registrations.'
+                Write-Host '   2. Open your existing app > Certificates & secrets > Certificates > Upload certificate.'
+                Write-Host "   3. Pick $cerPath. Add."
+                Write-Host ''
+                Write-Host '  Do NOT remove a certificate another computer is using - an app can hold several,'
+                Write-Host '  and removing the old one stops that computer refreshing. Do NOT create a client'
+                Write-Host '  secret; the certificate is the whole sign-in.'
+                Write-Host ''
+                if (-not $NoPrompt) { $null = Read-Host '  Press Enter when the certificate is uploaded' }
+            }
             $guid = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
             $t = $TenantId; $c = $ClientId
             while (-not ($t -match $guid)) { $t = Ask-Line '  Directory (tenant) ID' $curTenant; if ($NoPrompt) { break } }
@@ -464,12 +529,25 @@ try {
             $printersOn = (Test-Path $fleetCfg) -and (-not (Test-Path $fleetEx) -or
                 ((Get-Content $fleetCfg -Raw) -replace '\s', '') -ne ((Get-Content $fleetEx -Raw) -replace '\s', ''))
             if ($printersOn -and $pyExe) {
-                # -s ignores your personal package folder, which SYSTEM cannot see.
-                $probe = Invoke-PythonText -Exe $pyExe -Flags @('-s') -Code "import pysnmp; print('ok')"
-                if ($probe -ne 'ok') {
-                    Write-Warning '  The printer library (pysnmp) is installed only for your account, so the unattended'
-                    Write-Warning '  refresh would skip the printers. To fix, run once in a normal PowerShell window:'
-                    Write-Warning "     & `"$pyExe`" -m pip install `"pysnmp>=7.1`""
+                # Two questions, not one. This branch schedules a job that runs as
+                # the computer, so "can I import it" is the wrong question, and
+                # "installed only for your account" is not a fact until asked.
+                $snmpMine     = Test-PythonHasModule $pyExe 'pysnmp'
+                $snmpEveryone = Test-PythonHasModule $pyExe 'pysnmp' -MachineWide
+                if ($snmpEveryone) {
+                    Write-Host '  printer support (pysnmp): visible to the computer, so the daily refresh can check printers.'
+                } else {
+                    if ($snmpMine) {
+                        Write-Warning '  The printer library (pysnmp) is installed for YOUR account only, so the daily'
+                        Write-Warning '  refresh - which runs as the computer - will not be able to check the printers.'
+                    } else {
+                        Write-Warning '  The printer library (pysnmp) is not installed, so the daily refresh will not be'
+                        Write-Warning '  able to check the printers.'
+                    }
+                    Write-Warning '  Nothing else is affected, and no printer is reported offline because of it.'
+                    Write-Warning '  To fix it, from a window opened with "Run as administrator". The variable is'
+                    Write-Warning '  what stops pip finding your own copy and installing nothing:'
+                    Write-Warning "     `$env:PYTHONNOUSERSITE=1; & `"$pyExe`" -m pip install `"pysnmp>=7.1`""
                 }
             }
 
