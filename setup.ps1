@@ -485,12 +485,49 @@ if ($python) {
 # computer (SYSTEM), which cannot see a per-account library, so the printer step
 # would run, check nothing, and report healthy printers as offline. Install it
 # here, and say plainly which of the two it landed for.
-if ($python) {
-    $haveSnmp = $false
+function Test-PythonHasModule {
+    <# Can this interpreter import the module?
+
+       -MachineWide hides the invoking person's OWN site-packages, and that is
+       the only question worth asking before a scheduled task depends on it: the
+       task runs as the computer, whose profile is not this one.
+
+       This distinction is not academic. "Run as administrator" raises your
+       privileges; it does not change WHO you are, so %APPDATA%\Python stays on
+       sys.path. pip then reports "Requirement already satisfied" against a
+       per-user copy and installs nothing machine-wide - while a plain import
+       check, run as you, happily says yes. That combination let setup announce
+       "installed for the whole computer" on a machine where SYSTEM could not
+       see it at all. It is the same shape as every other bug in this suite:
+       the check asked an easier question than the thing it was guarding.
+
+       A twin of this function lives in check-setup.ps1. tests/test_setup_update.ps1
+       asserts the two bodies stay identical. #>
+    param([string]$Exe, [string]$Module, [switch]$MachineWide)
+    $had = [Environment]::GetEnvironmentVariable('PYTHONNOUSERSITE')
+    if ($MachineWide) { $env:PYTHONNOUSERSITE = '1' }
     try {
-        if ($onWindows) { $haveSnmp = -not ((& cmd.exe /d /c "$python -c ""import pysnmp"" 2>&1" | Out-String).Trim()) }
-        else            { $null = & $python -c 'import pysnmp'; $haveSnmp = ($LASTEXITCODE -eq 0) }
-    } catch { $haveSnmp = $false }
+        # cmd.exe merges the Microsoft Store stub's stderr into stdout, so a
+        # missing interpreter never surfaces as a red NativeCommandError.
+        if ($env:OS -eq 'Windows_NT') {
+            return -not ((& cmd.exe /d /c "$Exe -c ""import $Module"" 2>&1" | Out-String).Trim())
+        }
+        $null = & $Exe -c "import $Module" 2>&1
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        if ($MachineWide) {
+            if ($null -eq $had) { Remove-Item Env:\PYTHONNOUSERSITE -ErrorAction SilentlyContinue }
+            else { $env:PYTHONNOUSERSITE = $had }
+        }
+    }
+}
+
+if ($python) {
+    # Two questions, not one: can I see it, and can an account that is not me?
+    $snmpMine    = Test-PythonHasModule $python 'pysnmp'
+    $snmpEveryone = Test-PythonHasModule $python 'pysnmp' -MachineWide
 
     $elevated = $false
     if ($onWindows) {
@@ -501,34 +538,51 @@ if ($python) {
         } catch { $elevated = $false }
     }
 
-    if ($haveSnmp) {
-        Write-Host '  printer support (pysnmp): already installed'
+    if ($snmpEveryone) {
+        Write-Host '  printer support (pysnmp): installed for the whole computer'
     } elseif ($Unattended) {
         # -Unattended promises to skip install offers (see the header). Reaching
         # out to a package index is exactly the kind of thing that promise is
         # about, and on a machine with no route out it would sit there waiting.
         Write-Host '  printer support (pysnmp): skipped - unattended setup installs nothing'
+    } elseif ($snmpMine -and -not $elevated) {
+        # The case that bit a real machine. Offering to install here would run a
+        # pip that can see the per-account copy, report "already satisfied", and
+        # change nothing - so do not offer; say what is actually wrong.
+        Write-Host '  printer support (pysnmp): installed for YOUR account only'
+        Write-Warning '  That is enough when you refresh by hand. It is NOT enough for the daily'
+        Write-Warning '  automatic refresh, which runs as the computer and cannot see it.'
+        Write-Warning '  Re-run this setup from a window opened with "Run as administrator".'
     } elseif (Ask-YesNo '  Install printer support (pysnmp)? Needed only if you add printers' $true) {
-        # Elevated: no --user, so it goes machine-wide and SYSTEM can see it.
+        # Elevated: hide the per-account copy first. Without this pip finds it on
+        # sys.path, says "Requirement already satisfied" and writes nothing where
+        # the scheduled task can reach.
         # Not elevated: --user is the only thing that will succeed, and it is
         # explicitly NOT enough for an unattended daily refresh - say so.
+        $had = [Environment]::GetEnvironmentVariable('PYTHONNOUSERSITE')
         $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', 'pysnmp>=7.1')
-        if (-not $elevated) { $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--user', 'pysnmp>=7.1') }
-        & $python @pipArgs
-        try {
-            if ($onWindows) { $haveSnmp = -not ((& cmd.exe /d /c "$python -c ""import pysnmp"" 2>&1" | Out-String).Trim()) }
-            else            { $null = & $python -c 'import pysnmp'; $haveSnmp = ($LASTEXITCODE -eq 0) }
-        } catch { $haveSnmp = $false }
-        if ($haveSnmp -and $elevated) {
+        if ($elevated) { $env:PYTHONNOUSERSITE = '1' }
+        else { $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--user', 'pysnmp>=7.1') }
+        try { & $python @pipArgs }
+        finally {
+            if ($elevated) {
+                if ($null -eq $had) { Remove-Item Env:\PYTHONNOUSERSITE -ErrorAction SilentlyContinue }
+                else { $env:PYTHONNOUSERSITE = $had }
+            }
+        }
+        $snmpMine     = Test-PythonHasModule $python 'pysnmp'
+        $snmpEveryone = Test-PythonHasModule $python 'pysnmp' -MachineWide
+        if ($snmpEveryone) {
             Write-Host '  printer support (pysnmp): installed for the whole computer'
-        } elseif ($haveSnmp) {
+        } elseif ($snmpMine) {
             Write-Host '  printer support (pysnmp): installed for YOUR account only'
             Write-Warning '  That is enough when you refresh by hand. It is NOT enough for the daily'
             Write-Warning '  automatic refresh, which runs as the computer and cannot see it. If you'
             Write-Warning '  schedule that in step 6, re-run this setup from an Administrator window.'
         } else {
             Write-Warning '  pysnmp did not install. Printers are optional - everything else works.'
-            Write-Warning "  To try again later: $python -m pip install ""pysnmp>=7.1"""
+            Write-Warning "  To try again later, from an Administrator window:"
+            Write-Warning "    `$env:PYTHONNOUSERSITE=1; & ""$python"" -m pip install ""pysnmp>=7.1"""
         }
     } else {
         Write-Host '  printer support (pysnmp): skipped - add it later if you add printers'

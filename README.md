@@ -358,7 +358,10 @@ as before; the suite's alerts cover the same ground and more.
 **If something goes wrong:** run [`check-setup.ps1`](check-setup.ps1)
 (right-click → Run with PowerShell). It is read-only, says in plain words what
 is missing and what to do about each thing, and writes `check-setup.log` for
-whoever is helping you. Setup keeps its own `setup.log` the same way, and a
+whoever is helping you. Where a thing can be true for you and false for the
+computer — printer support is the one that bites — it asks both questions and
+tells you which answer it got, because the daily refresh runs as the computer
+and "it works when I click Refresh" says nothing about that. Setup keeps its own `setup.log` the same way, and a
 failed refresh ends with an "In plain words" section that translates the error
 into an action.
 

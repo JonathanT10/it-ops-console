@@ -210,8 +210,9 @@ if ($mode -ne 'off') {
 # collector needs pysnmp, and NOTHING in this suite used to install it or check
 # for it - which is how a laptop ended up with it under one account only. The
 # daily job runs as a different account, so it silently checked nothing and the
-# console reported three healthy printers as offline. Two accounts, two answers:
-# say which one was tested here, because passing as you proves nothing about it.
+# console reported three healthy printers as offline. Two accounts, two answers -
+# so ask BOTH: can this account see it, and can an account that is not this one?
+# Only the second answer says anything about the daily refresh.
 $pfdCfg = Join-Path (Join-Path $tools 'print-fleet-dashboard') 'config.ini'
 $printersListed = $false
 if (Test-Path $pfdCfg) {
@@ -224,25 +225,67 @@ if (Test-Path $pfdCfg) {
         }
     }
 }
-if ($printersListed) {
-    $who = try { [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { 'this account' }
-    $snmpOk = $false
-    if ($py) {
-        $probe = try { (& cmd.exe /d /c "$py -c ""import pysnmp"" 2>&1" | Out-String) } catch { 'no python' }
-        $snmpOk = -not ("$probe".Trim())
-    }
-    if ($snmpOk) {
-        Say "printer checks: the SNMP library is installed for $who"
-        if ($mode -eq 'unattended') {
-            Note "the daily refresh runs as SYSTEM, not as $who - if the printer page ever shows every printer offline at once, the library is missing for SYSTEM rather than the printers being down. Installing it from an Administrator window covers both."
+function Test-PythonHasModule {
+    <# Can this interpreter import the module?
+
+       -MachineWide hides the invoking person's OWN site-packages, and that is
+       the only question worth asking before a scheduled task depends on it: the
+       task runs as the computer, whose profile is not this one.
+
+       This distinction is not academic. "Run as administrator" raises your
+       privileges; it does not change WHO you are, so %APPDATA%\Python stays on
+       sys.path. pip then reports "Requirement already satisfied" against a
+       per-user copy and installs nothing machine-wide - while a plain import
+       check, run as you, happily says yes. That combination let setup announce
+       "installed for the whole computer" on a machine where SYSTEM could not
+       see it at all. It is the same shape as every other bug in this suite:
+       the check asked an easier question than the thing it was guarding.
+
+       A twin of this function lives in check-setup.ps1. tests/test_setup_update.ps1
+       asserts the two bodies stay identical. #>
+    param([string]$Exe, [string]$Module, [switch]$MachineWide)
+    $had = [Environment]::GetEnvironmentVariable('PYTHONNOUSERSITE')
+    if ($MachineWide) { $env:PYTHONNOUSERSITE = '1' }
+    try {
+        # cmd.exe merges the Microsoft Store stub's stderr into stdout, so a
+        # missing interpreter never surfaces as a red NativeCommandError.
+        if ($env:OS -eq 'Windows_NT') {
+            return -not ((& cmd.exe /d /c "$Exe -c ""import $Module"" 2>&1" | Out-String).Trim())
         }
-    } elseif ($py) {
-        Gap "printers are listed but the SNMP library is missing for $who - the printer page cannot update. From an Administrator PowerShell window: $py -m pip install ""pysnmp>=7.1"""
-    } else {
-        Note 'printers are listed but Python 3 was not found, so the SNMP library could not be checked'
+        $null = & $Exe -c "import $Module" 2>&1
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        if ($MachineWide) {
+            if ($null -eq $had) { Remove-Item Env:\PYTHONNOUSERSITE -ErrorAction SilentlyContinue }
+            else { $env:PYTHONNOUSERSITE = $had }
+        }
     }
 }
 
+if ($printersListed) {
+    $who = try { [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { 'this account' }
+    $snmpMine = $false; $snmpEveryone = $false
+    if ($py) {
+        $snmpMine     = Test-PythonHasModule $py 'pysnmp'
+        $snmpEveryone = Test-PythonHasModule $py 'pysnmp' -MachineWide
+    }
+    if (-not $py) {
+        Note 'printers are listed but Python 3 was not found, so the SNMP library could not be checked'
+    } elseif ($snmpEveryone) {
+        Say 'printer checks: the SNMP library is installed for the whole computer'
+    } elseif ($snmpMine -and $mode -eq 'unattended') {
+        # The exact state a real laptop sat in: it works when he clicks Refresh
+        # and fails every morning, because the two runs are different accounts.
+        Gap "the SNMP library is installed for $who ONLY, and the daily refresh runs as SYSTEM - so the printer step fails every morning while a refresh you start by hand works. From a PowerShell window opened with Run as administrator: `$env:PYTHONNOUSERSITE=1; & ""$py"" -m pip install ""pysnmp>=7.1"""
+    } elseif ($snmpMine) {
+        Say "printer checks: the SNMP library is installed for $who"
+        Note 'that covers refreshes you start yourself. If you later schedule an unattended daily refresh, install it for the whole computer as well - that runs as SYSTEM and cannot see a per-account copy.'
+    } else {
+        Gap "printers are listed but the SNMP library is missing for $who - the printer page cannot update. From a PowerShell window opened with Run as administrator: `$env:PYTHONNOUSERSITE=1; & ""$py"" -m pip install ""pysnmp>=7.1"""
+    }
+}
 # ---- alerts ---- #
 $alertsIni = Join-Path (Join-Path $tools 'it-ops-console') 'alerts.ini'
 if (Test-Path $alertsIni) {
