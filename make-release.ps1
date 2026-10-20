@@ -88,7 +88,8 @@ change it):
                                               (a Global Administrator registers
                                                a read-only app once - setup
                                                walks you through it; no
-                                               password is stored anywhere)
+                                               Microsoft 365 password is
+                                               stored)
 
 Alerts (optional): the console works out what needs a person on every
 refresh. To have that sent to a Teams channel or an email address, put your
@@ -107,10 +108,18 @@ name, so point it at your own VLANs. You can still list them by hand in
 C:\IT-Ops\tools\print-fleet-dashboard\config.ini instead; either way the next
 Refresh picks them up.
 
-Everything against your tenant is read-only. Nothing stores a password.
-Setup locks the C:\IT-Ops folder to you and Administrators, so the data it
-collects (admin names, stale accounts, the app inventory) is not readable by
-other people who use this computer.
+Network (optional): copy network.example.ini to network.ini in
+C:\IT-Ops\tools\it-ops-console, list your switches and access points, then
+save each site's SNMPv3 user and password (from LastPass) by running
+set-network-credential.ps1 from a PowerShell window opened with "Run as
+administrator". The next Refresh adds a Network tab.
+
+Everything against your tenant is read-only, and no Microsoft 365 password is
+stored. The one stored secret is the optional network check's SNMPv3
+credential: encrypted by Windows, readable only on this computer, and kept in
+the locked folder below. Setup locks the C:\IT-Ops folder to you and
+Administrators, so the data it collects (admin names, stale accounts, the app
+inventory) is not readable by other people who use this computer.
 
 If something goes wrong: run check-setup.ps1 in C:\IT-Ops\tools\it-ops-console
 (right-click > Run with PowerShell) and send check-setup.log to whoever helps you.

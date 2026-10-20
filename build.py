@@ -3,8 +3,8 @@
     python build.py --config sources.ini --out console-site
 
 The console never talks to Microsoft Graph, SNMP, or your printers. It reads
-the JSON (and one SQLite file) that entra-tenant-docs, entra-security-snapshot,
-m365-license-waste-report and print-fleet-dashboard produce, and renders a
+the JSON (and two SQLite files) that entra-tenant-docs, entra-security-snapshot,
+m365-license-waste-report, print-fleet-dashboard and network/collector.py produce, and renders a
 small static site: one page per domain, plus an overview that carries only
 headline numbers and how fresh each feed is.
 
@@ -66,6 +66,8 @@ def main():
     # sample was made - which is a lie about the tool, not about the data.
     fleet_now = model.fleet_as_of(feeds["fleet"]) if args.sample else None
     models["fleet"] = model.fleet_model(feeds["fleet"], now=fleet_now)
+    # Switches and access points (network/collector.py writes network.db).
+    models["network"] = model.network_model(feeds.get("network"))
     # Where the printer collector looks, and what each place found.
     models["discovery"] = model.discovery_model(feeds.get("fleet_discovery"))
     models["changes"] = model.changes_model(feeds["history"], feeds.get("run_summary"))
@@ -114,6 +116,7 @@ def main():
         "security": models["security"] is not None,
         "licensing": models["licensing"] is not None,
         "fleet": models["fleet"] is not None,
+        "network": models["network"] is not None,
         "changes": models["changes"] is not None,
         "alerts": True,
     }
@@ -138,6 +141,9 @@ def main():
                          pages.build_fleet(models["fleet"], feeds["fleet"],
                                            available, generated,
                                            discovery=models["discovery"])),
+        write_page(args.out, "network",
+                         pages.build_network(models["network"], feeds.get("network"),
+                                             available, generated)),
         write_page(args.out, "changes",
                          pages.build_changes(models["changes"], feeds["history"],
                                              available, generated)),

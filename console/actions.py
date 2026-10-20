@@ -94,6 +94,21 @@ def next_step(kind, key=None):
     if kind == "discovery-problem":
         return ("Fix the place to look on the console's Print fleet tab - the message says "
                 "what is wrong with it.")
+    if kind == "network":
+        what = str(key or "")
+        if what == "unreachable":
+            return ("Check the device has power and its uplink is connected; then check it in the "
+                    "UniFi console. If it answers there, its SNMP settings may have changed.")
+        if what == "uplink":
+            return ("Check the cable or fibre on that port and the switch at the other end - "
+                    "everything behind this uplink may be cut off.")
+        if what == "rebooted":
+            return ("If nobody restarted it or updated its firmware, check the UniFi console's "
+                    "event log and the power at that location.")
+        if what == "errors":
+            return ("Errors climbing on a port usually mean a bad cable, a bad patch, or a duplex "
+                    "mismatch - reseat or replace the cable on the ports named.")
+        return "Check the device in the UniFi console."
     if kind == "stale-data":
         return 'Run "Refresh IT Ops Data", or check that the automatic refresh is still scheduled (check-setup.ps1).'
     return ""

@@ -1056,9 +1056,13 @@ def test_alert_keys_are_unique():
 
     Nothing asserted this before, which is exactly why it went unnoticed."""
     models, feeds = _sample_models()
+    # The network sample too: its alerts share the one state file.
+    models["network"] = model.network_model(feeds.get("network"))
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cfg = A.load_config(os.path.join(here, "alerts.example.ini"))
     fired = A.evaluate(cfg, models, feeds, now=parse_ts("2026-09-02T12:00:00Z"))
+    check("keys: the network sample fires its alerts alongside the rest",
+          len([a for a in fired if a["tab"] == "network"]) == 4)
     keys = [a["key"] for a in fired]
     dupes = sorted({k for k in keys if keys.count(k) > 1})
     check("keys: every fired alert has a key of its own", not dupes)
@@ -1511,6 +1515,7 @@ def _all_pages(models, feeds, available):
         "licensing": pages.build_licensing(models["licensing"], feeds["licensing"], available, gen),
         "fleet": pages.build_fleet(models["fleet"], feeds["fleet"], available, gen,
                                    discovery=models.get("discovery")),
+        "network": pages.build_network(models.get("network"), feeds.get("network"), available, gen),
         "changes": pages.build_changes(models["changes"], feeds["history"], available, gen),
         "alerts": pages.build_alerts(models.get("alerts"), available, gen),
     }
@@ -1525,7 +1530,14 @@ def test_render_empty_console():
     available = {"index": True, "identity": False, "security": False,
                  "licensing": False, "fleet": False, "changes": False}
     out = _all_pages(models, feeds, available)
-    check("render: all 7 pages render with zero feeds", len(out) == 7)
+    check("render: all 8 pages render with zero feeds", len(out) == 8)
+    check("render: with no network feed the Network page says it is not configured",
+          "network data is not configured" in out["network"].lower())
+    never = pages.build_network(None, Feed("network", "Network", "/x/network.db", missing=True),
+                                available, "2026-01-01 00:00:00")
+    check("render: configured but never collected, it explains how to turn it on",
+          "network.example.ini" in never and "set-network-credential.ps1" in never
+          and "could not be read" not in never)
     check("render: every page is a full document",
           all(h.startswith("<!DOCTYPE html>") and h.rstrip().endswith("</html>")
               for h in out.values()))
@@ -1593,15 +1605,15 @@ def test_render_full(tmp):
     check("render: sample build exits clean", rc == 0)
     site = os.path.join(tmp, "site")
     names = sorted(os.listdir(site)) if os.path.isdir(site) else []
-    check("render: seven pages written", len(names) == 7)
+    check("render: eight pages written", len(names) == 8)
     with open(os.path.join(site, "index.html"), encoding="utf-8") as fh:
         idx = fh.read()
     check("render: overview links every domain",
           all(('%s.html' % p) in idx for p in
-              ("identity", "security", "licensing", "fleet", "changes")))
+              ("identity", "security", "licensing", "fleet", "network", "changes")))
     check("render: freshness dot rendered", 'class="dot' in idx)
     _pages = {}
-    for _n in ("index", "identity", "security", "licensing", "fleet", "changes", "alerts"):
+    for _n in ("index", "identity", "security", "licensing", "fleet", "network", "changes", "alerts"):
         with open(os.path.join(site, "%s.html" % _n), encoding="utf-8") as fh:
             _pages[_n] = fh.read()
     check("render: every page carries the file note, and it is NOT hidden by default",
@@ -1624,6 +1636,140 @@ def test_render_full(tmp):
     check("render: the built sample never puts the SNMP community on a page",
           all("public" not in open(os.path.join(site, n), encoding="utf-8").read()
               for n in names)) 
+    with open(os.path.join(site, "network.html"), encoding="utf-8") as fh:
+        net = fh.read()
+    check("render: the built sample has a Network page with its devices",
+          "HOU Floor 1 Switch" in net and "Uplink down" in net and "Restarted" in net)
+    check("render: the sample uses documentation addresses only (192.0.2.x)",
+          "192.0.2.21" in net and "10.0.10." not in net)
+    check("render: the Network page is in every page's nav",
+          all('href="network.html"' in h for h in _pages.values()))
+
+
+# --------------------------------------------------------------------------- #
+# Network (network.db -> model -> page -> alerts)
+# --------------------------------------------------------------------------- #
+
+def _net_db(path, polls):
+    """polls: [(ip, name, site, ts, reachable, uptime_s, detail, ifaces)]."""
+    sys.path.insert(0, os.path.join(ROOT_DIR, "network"))
+    import netdb
+    conn = netdb.connect(path)
+    for ip, name, site, ts, ok, up, detail, ifs in polls:
+        did = netdb.upsert_device(conn, ip, name, site, ts, ok)
+        netdb.insert_snapshot(conn, did, ts, ok, up, detail, ifs)
+    conn.commit()
+    conn.close()
+
+
+def _ifs(*spec):
+    return [{"if_index": i, "descr": "Port %d" % i, "oper_status": st, "in_errors": ie,
+             "out_errors": oe, "uplink": up} for i, st, ie, oe, up in spec]
+
+
+def test_network(tmp):
+    from console.sources import load_network, mark_not_updated
+    d = os.path.join(tmp, "net")
+    os.makedirs(d, exist_ok=True)
+    db = os.path.join(d, "network.db")
+    t0, t1, old = "2026-10-19T06:00:00Z", "2026-10-20T06:00:00Z", "2026-10-10T06:00:00Z"
+    _net_db(db, [
+        # steady, uplink up, errors grew by 30
+        ("192.0.2.2", "Core", "dfw", t0, True, 1000, None, _ifs((1, 1, 5, 0, False), (49, 1, 0, 0, True))),
+        ("192.0.2.2", "Core", "dfw", t1, True, 87400, None, _ifs((1, 1, 30, 5, False), (49, 1, 0, 0, True))),
+        # restarted: uptime went backwards; counters reset too
+        ("192.0.2.3", "Edge", "dfw", t0, True, 90000, None, _ifs((1, 1, 900, 0, False))),
+        ("192.0.2.3", "Edge", "dfw", t1, True, 60, None, _ifs((1, 1, 0, 0, False))),
+        # answered before, not now
+        ("192.0.2.4", "Gone", "hou", t0, True, 500, None, _ifs((1, 1, 0, 0, False))),
+        ("192.0.2.4", "Gone", "hou", t1, False, None, "No SNMP response (timed out)", []),
+        # uplink down
+        ("192.0.2.5", "Floor", "hou", t1, True, 4000, None, _ifs((25, 2, 0, 0, True), (2, 2, 0, 0, False))),
+        # not part of the latest check (taken out of network.ini a while ago)
+        ("192.0.2.6", "Retired", "hou", old, True, 4000, None, _ifs((1, 1, 0, 0, False))),
+    ])
+    data, ts = load_network(db)
+    check("network: loader opens the database and reports its newest poll",
+          len(data["devices"]) == 5 and ts == parse_ts(t1))
+    gone = [e for e in data["devices"] if e["device"]["ip"] == "192.0.2.4"][0]
+    check("network: an unreachable latest poll carries no 'previous' to compare with",
+          gone["latest"]["reachable"] == 0 and gone["previous"] is None)
+    check("network: the loader never opens the file for writing",
+          "mode=ro" in __import__("inspect").getsource(load_network))
+
+    f = Feed("network", "Network", db, data=data, ts=ts)
+    m = model.network_model(f)
+    by = {r["ip"]: r for r in m["devices"]}
+    check("network model: answering vs not answering vs not checked",
+          by["192.0.2.2"]["status"] == "up" and by["192.0.2.4"]["status"] == "unreachable"
+          and by["192.0.2.6"]["status"] == "stale")
+    check("network model: a device not in the latest check is not counted either way",
+          m["total"] == 4 and m["up"] == 3 and len(m["not_checked"]) == 1)
+    check("network model: unreachable keeps the collector's own words",
+          by["192.0.2.4"]["detail"] == "No SNMP response (timed out)")
+    check("network model: uptime going backwards is a restart",
+          by["192.0.2.3"]["rebooted"] and not by["192.0.2.2"]["rebooted"])
+    check("network model: a restart's reset counters are not read as 'errors fell'",
+          by["192.0.2.3"]["error_increase"] is None)
+    check("network model: errors added since the check before, in and out together",
+          by["192.0.2.2"]["error_increase"] == 30 and by["192.0.2.2"]["error_ports"] == ["Port 1"])
+    check("network model: only configured uplinks count as uplinks",
+          [u["if_index"] for u in by["192.0.2.5"]["uplinks"]] == [25]
+          and len(by["192.0.2.5"]["uplinks_down"]) == 1 and m["uplinks_down"][0][1]["if_index"] == 25)
+    check("network model: worst first - unreachable at the top",
+          m["devices"][0]["ip"] == "192.0.2.4")
+    check("network model: no feed is no model", model.network_model(Feed("network", "Network", None)) is None)
+
+    # -- alerts ------------------------------------------------------------- #
+    cfg = A.load_config(os.path.join(ROOT_DIR, "alerts.example.ini"))
+    fired = A.evaluate(cfg, {"network": m}, {"network": f}, now=parse_ts(t1))
+    keys = {a["key"] for a in fired}
+    check("network alerts: unreachable, keyed by address",
+          "network/device_unreachable/192.0.2.4" in keys)
+    check("network alerts: an uplink down, keyed by address and port",
+          "network/uplink_down/192.0.2.5:25" in keys)
+    check("network alerts: a desk port down is NOT an uplink alert",
+          "network/uplink_down/192.0.2.5:2" not in keys)
+    reboot = [a for a in fired if a["rule"] == "device_rebooted"]
+    check("network alerts: a restart is an event, said once",
+          len(reboot) == 1 and reboot[0]["transient"] and reboot[0]["key"].startswith("network/device_rebooted/192.0.2.3@"))
+    check("network alerts: errors rising stays quiet under the line (30 < 100)",
+          not [a for a in fired if a["rule"] == "errors_rising"])
+    cfg["rules"]["network.errors_rising"] = 20
+    fired2 = A.evaluate(cfg, {"network": m}, {"network": f}, now=parse_ts(t1))
+    check("network alerts: and speaks over it",
+          [a["key"] for a in fired2 if a["rule"] == "errors_rising"] == ["network/errors_rising/192.0.2.2"])
+    check("network alerts: a device not in the latest check raises nothing",
+          not [a for a in fired2 if "192.0.2.6" in a["key"]])
+    cfg["tabs"]["network"] = {"notify": False}
+    check("network alerts: notify = no silences the whole tab",
+          not [a for a in A.evaluate(cfg, {"network": m}, {"network": f}, now=parse_ts(t1))
+               if a["tab"] == "network"])
+    check("network alerts: the tab is in alerts.example.ini with all four rules",
+          all(("%s = " % r) in open(os.path.join(ROOT_DIR, "alerts.example.ini")).read()
+              for r in ("device_unreachable", "uplink_down", "device_rebooted", "errors_rising")))
+
+    # -- page --------------------------------------------------------------- #
+    avail = {"index": True, "network": True}
+    page = pages.build_network(m, f, avail, "2026-10-20 06:00:00")
+    check("network page: names what needs a person, with the next step",
+          "Gone" in page and "Uplink down" in page and "Check the cable or fibre" in page)
+    check("network page: a not-checked device is labelled, not called down",
+          "Not checked" in page)
+    check("network page: no credential words on the page",
+          all(w not in page.lower() for w in ("password", "authkey", "privkey", "usm")))
+    ov = pages.build_overview({"network": m}, {"network": f}, avail, "2026-10-20 06:00:00")
+    check("network overview: a tile with answering/total", ">3/4<" in ov and 'href="network.html"' in ov)
+    check("network overview: with no network model the tile says not configured",
+          "Network" in pages.build_overview({}, {}, avail, "x"))
+
+    # -- a failed network step marks the feed, like every other collector ---- #
+    feeds = {"network": Feed("network", "Network", db, data=data, ts=utcnow() - timedelta(hours=2)),
+             "refresh_status": Feed("refresh_status", "Automatic refresh", "x", ts=utcnow(), data={
+                 "Steps": [{"Step": "network-health", "Status": "FAILED", "Detail": "exit code 4"}]})}
+    mark_not_updated(feeds)
+    check("network: a failed network-health step marks the Network feed not updated",
+          feeds["network"].stale_reason == "exit code 4")
 
 
 def main():
@@ -1655,6 +1801,7 @@ def main():
         test_render_empty_console()
         test_render_escaping()
         test_render_full(tmp)
+        test_network(tmp)
     print("")
     if FAILS:
         print("RESULT: %d FAILURES" % len(FAILS))

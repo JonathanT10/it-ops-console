@@ -53,6 +53,22 @@
     The fleet database the collector appends to. Defaults to fleet.db in
     -OutputRoot, which is where setup's sources.ini already points.
 
+.PARAMETER NetworkConfig
+    network.ini - the switches and access points to check over SNMPv3.
+    Usually unnecessary: a network.ini beside this script that differs from
+    network.example.ini turns the network check on by itself.
+
+.PARAMETER NetworkDb
+    The network database the check appends to. Defaults to network.db in
+    -OutputRoot, which is where setup's sources.ini already points.
+
+.PARAMETER NetworkCollector
+    The network collector script. Defaults to network\collector.py beside this
+    script; the tests point it elsewhere.
+
+.PARAMETER SkipNetwork
+    Do not check the network devices this run, even if network.ini lists some.
+
 .PARAMETER LicensePrices
     An INI of per-seat monthly prices, so the license report shows the waste in
     dollars. Usually unnecessary: a prices.ini beside the license tool is used
@@ -113,11 +129,15 @@ param(
     [string]$Python = 'python',
     [string]$FleetConfig,
     [string]$FleetDb,
+    [string]$NetworkConfig,
+    [string]$NetworkDb,
+    [string]$NetworkCollector,
     [string]$LicensePrices,
     [switch]$SkipTenantDocs,
     [switch]$SkipSecurity,
     [switch]$SkipLicensing,
     [switch]$SkipFleet,
+    [switch]$SkipNetwork,
     [switch]$NoConnect,
     [switch]$NoStatusPage,
     [switch]$Scheduled,
@@ -179,6 +199,18 @@ function Get-PlainWords {
     # somebody to go look at three printers that were working fine.
     if ($Step -eq 'print-fleet-collector' -and $Detail -eq 'exit code 3') {
         return 'The printers were not checked at all: the checker needs a piece of Python called pysnmp and the account that ran this cannot see it. No printer has been marked offline and nothing was recorded - the printer page still shows the last real reading. Install pysnmp for the whole computer rather than for one person: the daily refresh runs as the computer itself, which cannot see a library installed under a single account. The exact command is in the run log.'
+    }
+    # The network check uses the same exit codes for the same two reasons it
+    # can check nothing at all - and, like the printers, says plainly that
+    # nothing was marked down, because the next move is not "go look at a switch".
+    if ($Step -eq 'network-health' -and $Detail -eq 'exit code 3') {
+        return 'The network devices were not checked at all: the check needs a piece of Python called pysnmp and the account that ran this cannot see it. Nothing was marked down and nothing was recorded - the Network page still shows the last real reading. Install pysnmp for the whole computer from a PowerShell window opened with Run as administrator; the exact command is in the run log.'
+    }
+    if ($Step -eq 'network-health' -and $Detail -eq 'exit code 4') {
+        return 'The network devices were not checked at all: the saved SNMPv3 credential is missing, cannot be opened on this computer, or has nothing for one of the sites in network.ini. Nothing was marked down and nothing was recorded. On this computer, in a PowerShell window opened with Run as administrator, run set-network-credential.ps1 from the console folder and enter that site''s user and password from LastPass.'
+    }
+    if ($Step -eq 'network-health' -and $Detail -eq 'exit code 5') {
+        return 'A network device answered but refused the saved SNMPv3 credential, so it was not checked - and NOT marked down. The run log names it. Re-enter that site''s credential with set-network-credential.ps1 (Run as administrator, on this computer), or check the SNMP settings for that site in the UniFi console.'
     }
     switch -Wildcard ($Detail) {
         '*AADSTS*'                       { return 'The sign-in did not complete. Run this again and finish the sign-in window.' }
@@ -273,6 +305,7 @@ $script:StatusSteps = @(
     [pscustomobject]@{ key='security';  label='Checking security posture';            detail='MFA coverage, admin accounts, stale accounts, legacy sign-ins'; state='pending'; seconds=$null; now=$null }
     [pscustomobject]@{ key='licensing'; label='Reviewing licenses';                   detail='Paid seats nobody is using';                            state='pending'; seconds=$null; now=$null }
     [pscustomobject]@{ key='fleet';     label='Polling printers';                     detail='Optional - only when printers are configured';          state='pending'; seconds=$null; now=$null }
+    [pscustomobject]@{ key='network';   label='Checking network devices';             detail='Optional - only when switches are configured';          state='pending'; seconds=$null; now=$null }
     [pscustomobject]@{ key='build';     label='Building your console';                detail='Turning everything into readable pages';                state='pending'; seconds=$null; now=$null }
     [pscustomobject]@{ key='alerts';    label='Sending alerts';                       detail='Only if something is new, worse or cleared';           state='pending'; seconds=$null; now=$null }
 )
@@ -1544,6 +1577,37 @@ if ($doFleet) {
 } else {
     Add-Result 'print-fleet-collector' 'skipped' 'config.ini is still the unedited example'
     Set-StepState 'fleet' 'skipped' -Detail 'Optional - add printer IPs to config.ini and Refresh again'
+}
+
+# Network devices engage the same way: a network.ini beside this script that
+# differs from network.example.ini is a person saying "these are my switches".
+# The credential is never passed on a command line - only where its encrypted
+# file is. Explicit -NetworkConfig still overrides; -SkipNetwork still wins.
+if (-not $NetworkConfig) {
+    $autoNet = Join-Path $PSScriptRoot 'network.ini'
+    $exNet   = Join-Path $PSScriptRoot 'network.example.ini'
+    if (Test-Path $autoNet) {
+        $edited = $true
+        if (Test-Path $exNet) {
+            $a = (Get-Content $autoNet -Raw) -replace '\s', ''
+            $b = (Get-Content $exNet -Raw) -replace '\s', ''
+            $edited = ($a -ne $b)
+        }
+        if ($edited) { $NetworkConfig = $autoNet }
+    }
+}
+if (-not $NetworkDb) { $NetworkDb = Join-Path $OutputRoot 'network.db' }
+if (-not $NetworkCollector) { $NetworkCollector = Join-Path (Join-Path $PSScriptRoot 'network') 'collector.py' }
+$networkSecret = Join-Path $OutputRoot 'network-credential.bin'
+if (-not $SkipNetwork -and $NetworkConfig) {
+    Invoke-Native -Name 'network-health' -StepKey 'network' -Exe $Python -WorkDir $PSScriptRoot `
+        -NativeArgs @($NetworkCollector, '--config', $NetworkConfig, '--db', $NetworkDb, '--secret', $networkSecret)
+} elseif ($SkipNetwork) {
+    Add-Result 'network-health' 'skipped'
+    Set-StepState 'network' 'skipped'
+} else {
+    Add-Result 'network-health' 'skipped' 'network.ini is missing or still the unedited example'
+    Set-StepState 'network' 'skipped' -Detail 'Optional - list switches in network.ini and Refresh again'
 }
 
 # --------------------------------------------------------------------------- #

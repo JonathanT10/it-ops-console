@@ -226,6 +226,126 @@ def fleet_model(feed, now=None):
 
 
 # --------------------------------------------------------------------------- #
+# Network (network.db - switches and access points over SNMPv3)
+# --------------------------------------------------------------------------- #
+
+# A device whose newest poll is this much older than the newest poll in the
+# file was not part of the latest check - usually taken out of network.ini.
+# It is shown as "not checked" rather than as up or down: its last answer says
+# nothing about now. Measured against the file's own newest poll, not the
+# clock, so an old file is reported once (by its feed age), not per device.
+STALE_NETWORK_HOURS = 48
+
+IF_UP = 1  # ifOperStatus: 1 up, 2 down, 3 testing, 5 dormant, 7 lowerLayerDown ...
+IF_STATUS_WORD = {1: "up", 2: "down", 3: "testing", 4: "unknown", 5: "dormant",
+                  6: "not present", 7: "lower layer down"}
+
+
+def _uptime_text(seconds):
+    if seconds is None:
+        return "-"
+    days, rest = divmod(int(seconds), 86400)
+    hours = rest // 3600
+    if days:
+        return "%dd %dh" % (days, hours)
+    return "%dh %dm" % (hours, (rest % 3600) // 60)
+
+
+def _error_increase(latest, previous):
+    """Errors (in + out) added since the previous answer, summed over the
+    interfaces both polls saw. A counter that went DOWN was reset (a reboot or
+    a counter wrap), so that interface says nothing this time."""
+    before = {i["if_index"]: i for i in previous}
+    total, worst = 0, []
+    for i in latest:
+        p = before.get(i["if_index"])
+        if p is None:
+            continue
+        grew = 0
+        for k in ("in_errors", "out_errors"):
+            a, b = i.get(k), p.get(k)
+            if a is not None and b is not None and a >= b:
+                grew += a - b
+        if grew:
+            total += grew
+            worst.append((grew, i.get("descr") or "port %s" % i["if_index"]))
+    worst.sort(key=lambda w: (-w[0], w[1]))
+    return total, [w[1] for w in worst[:3]]
+
+
+def network_model(feed):
+    """Switches and access points: up, unreachable, or not part of the last
+    check; their uplinks; whether they restarted or started logging errors
+    since the answer before. None when there is no network feed."""
+    if feed is None or not feed.ok:
+        return None
+    entries = (feed.data or {}).get("devices") or []
+    newest = None
+    for e in entries:
+        t = parse_ts((e.get("latest") or {}).get("ts"))
+        if t and (newest is None or t > newest):
+            newest = t
+    rows = []
+    for e in entries:
+        dev, snap, prev = e.get("device") or {}, e.get("latest"), e.get("previous")
+        checked = parse_ts((snap or {}).get("ts"))
+        if snap is None or checked is None or (
+                newest and (newest - checked).total_seconds() / 3600 > STALE_NETWORK_HOURS):
+            status = "stale"
+        elif snap.get("reachable"):
+            status = "up"
+        else:
+            status = "unreachable"
+        ifs = (e.get("latest_ifaces") or []) if status == "up" else []
+        uplinks = [{"if_index": i["if_index"], "descr": i.get("descr") or "port %s" % i["if_index"],
+                    "oper_status": i.get("oper_status"),
+                    "status_word": IF_STATUS_WORD.get(i.get("oper_status"), "unknown"),
+                    "up": i.get("oper_status") == IF_UP}
+                   for i in ifs if i.get("uplink")]
+        uptime, prev_uptime = (snap or {}).get("uptime_s"), (prev or {}).get("uptime_s")
+        rebooted = (status == "up" and uptime is not None and prev_uptime is not None
+                    and uptime < prev_uptime)
+        errors, error_ports = (None, [])
+        if status == "up" and prev is not None and not rebooted:
+            errors, error_ports = _error_increase(ifs, e.get("previous_ifaces") or [])
+        rows.append({
+            "name": dev.get("name") or dev.get("ip"),
+            "ip": dev.get("ip"),
+            "site": dev.get("site") or "",
+            "status": status,
+            "detail": (snap or {}).get("detail") or "",
+            "checked": (snap or {}).get("ts"),
+            "checked_text": _when_text(checked) if checked else "never",
+            "last_seen": dev.get("last_seen"),
+            "uptime_s": uptime,
+            "uptime_text": _uptime_text(uptime) if status == "up" else "-",
+            "rebooted": rebooted,
+            "previous_checked": (prev or {}).get("ts"),
+            "ifaces_total": len(ifs),
+            "ifaces_up": sum(1 for i in ifs if i.get("oper_status") == IF_UP),
+            "uplinks": uplinks,
+            "uplinks_down": [u for u in uplinks if not u["up"]],
+            "error_increase": errors,
+            "error_ports": error_ports,
+        })
+    order = {"unreachable": 0, "up": 1, "stale": 2}
+    rows.sort(key=lambda r: (order.get(r["status"], 3),
+                             0 if r["uplinks_down"] else 1, r["site"], r["name"] or ""))
+    checked = [r for r in rows if r["status"] != "stale"]
+    return {
+        "devices": rows,
+        "total": len(checked),
+        "up": sum(1 for r in checked if r["status"] == "up"),
+        "unreachable": [r for r in rows if r["status"] == "unreachable"],
+        "uplinks_down": [(r, u) for r in rows for u in r["uplinks_down"]],
+        "rebooted": [r for r in rows if r["rebooted"]],
+        "not_checked": [r for r in rows if r["status"] == "stale"],
+        "sites": sorted({r["site"] for r in checked if r["site"]}),
+        "as_of": newest,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Posture over time (archived security + licensing snapshots)
 #
 # run-all archives each collector's JSON after a successful run; those folders

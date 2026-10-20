@@ -238,6 +238,53 @@ def load_fleet(path):
         conn.close()
 
 
+def load_network(path):
+    """network/collector.py network.db -> each switch or access point with its
+    latest poll, and the answer before that (what "rebooted" and "errors
+    rising" are measured against).
+
+    Read-only, like the printer database: the collector may be writing it.
+    The file holds no credential of any kind, so nothing secret passes here."""
+    conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    conn.row_factory = sqlite3.Row
+
+    def ifaces(snap):
+        if not snap:
+            return []
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM ifaces WHERE snapshot_id = ? ORDER BY if_index", (snap["id"],))]
+
+    try:
+        devices = []
+        newest = None
+        for d in conn.execute("SELECT * FROM devices ORDER BY site, name"):
+            latest = conn.execute(
+                "SELECT * FROM snapshots WHERE device_id = ? ORDER BY ts DESC, id DESC LIMIT 1",
+                (d["id"],)).fetchone()
+            previous = None
+            if latest is not None and latest["reachable"]:
+                previous = conn.execute(
+                    "SELECT * FROM snapshots WHERE device_id = ? AND reachable = 1 AND id <> ?"
+                    " AND ts <= ? ORDER BY ts DESC, id DESC LIMIT 1",
+                    (d["id"], latest["id"], latest["ts"])).fetchone()
+            if latest is not None:
+                ts = parse_ts(latest["ts"])
+                if ts and (newest is None or ts > newest):
+                    newest = ts
+            devices.append({
+                "device": dict(d),
+                "latest": dict(latest) if latest else None,
+                "latest_ifaces": ifaces(latest),
+                "previous": dict(previous) if previous else None,
+                "previous_ifaces": ifaces(previous),
+            })
+        if not devices:
+            raise ValueError("network database has no devices yet")
+        return {"devices": devices}, newest
+    finally:
+        conn.close()
+
+
 LOADERS = {
     "tenant":            ("Identity",         load_tenant),
     "run_summary":       ("Last run",         load_run_summary),
@@ -256,6 +303,8 @@ LOADERS = {
     "refresh_status":    ("Automatic refresh", load_refresh_status),
     # Written by the printer collector when config.ini names places to look.
     "fleet_discovery":   ("Printer discovery", load_fleet_discovery),
+    # Written by network/collector.py (switches and access points, SNMPv3).
+    "network":           ("Network",          load_network),
 }
 
 
@@ -266,6 +315,7 @@ STEP_FEEDS = {
     "entra-security-snapshot":   ("security", "security_history"),
     "m365-license-waste-report": ("licensing", "licensing_history"),
     "print-fleet-collector":     ("fleet", "fleet_discovery"),
+    "network-health":            ("network",),
 }
 
 

@@ -32,6 +32,7 @@ TABS = [
     ("security",  "Security"),
     ("licensing", "Licensing"),
     ("fleet",     "Print fleet"),
+    ("network",   "Network"),
     ("changes",   "What changed"),
     ("refresh",   "Refresh"),
 ]
@@ -353,6 +354,51 @@ def ev_discovery_problem(ctx, rule, value):
 
 
 # --------------------------------------------------------------------------- #
+# Network (switches and access points)
+# --------------------------------------------------------------------------- #
+
+def _network(ctx):
+    return (ctx.models.get("network") or {}).get("devices") or []
+
+
+def ev_device_unreachable(ctx, rule, value):
+    return [_alert(rule, d["ip"], "Not answering: %s" % d["name"],
+                   "%s%s - last answered %s" % (d["site"] + ", " if d["site"] else "", d["ip"],
+                                                str(d.get("last_seen") or "never")[:16]),
+                   next_step("network", "unreachable"))
+            for d in _network(ctx) if d["status"] == "unreachable"]
+
+
+def ev_device_rebooted(ctx, rule, value):
+    """An event: told once per restart, keyed by the poll that noticed it."""
+    return [_alert(rule, "%s@%s" % (d["ip"], d.get("checked") or ""),
+                   "Restarted: %s" % d["name"],
+                   "up %s now; it had been up longer at the check before" % d["uptime_text"],
+                   next_step("network", "rebooted"), transient=True)
+            for d in _network(ctx) if d["rebooted"]]
+
+
+def ev_uplink_down(ctx, rule, value):
+    out = []
+    for d in _network(ctx):
+        for u in d["uplinks_down"]:
+            out.append(_alert(rule, "%s:%s" % (d["ip"], u["if_index"]),
+                              "Uplink down: %s, %s" % (d["name"], u["descr"]),
+                              "port %s is %s" % (u["if_index"], u["status_word"]),
+                              next_step("network", "uplink")))
+    return out
+
+
+def ev_errors_rising(ctx, rule, value):
+    return [_alert(rule, d["ip"], "Interface errors rising: %s" % d["name"],
+                   "%s new errors since the check before (%s) - your line is %d"
+                   % (format(d["error_increase"], ","), ", ".join(d["error_ports"]), int(value)),
+                   next_step("network", "errors"))
+            for d in _network(ctx)
+            if d["error_increase"] is not None and d["error_increase"] > value]
+
+
+# --------------------------------------------------------------------------- #
 # What changed (events, not states: reported once, never "cleared")
 # --------------------------------------------------------------------------- #
 
@@ -519,6 +565,15 @@ CATALOG = [
          ev_new_printer_found, help="A scan of the places you named turned up a printer you had not listed. Said once."),
     Rule("discovery_problem", "fleet", "A place to look could not be scanned", "switch", True, "warning",
          ev_discovery_problem, help="A range with a typo, or one too big to scan, finds nothing while looking like it works."),
+    # network
+    Rule("device_unreachable", "network", "A switch or access point is not answering", "switch", True, "critical",
+         ev_device_unreachable, help="It did not answer the last check at all."),
+    Rule("uplink_down", "network", "An uplink port is down", "switch", True, "critical",
+         ev_uplink_down, help="Only the ports listed under [uplinks] in network.ini."),
+    Rule("device_rebooted", "network", "A switch or access point restarted", "switch", True, "warning",
+         ev_device_rebooted, help="Its uptime went backwards since the check before. Said once."),
+    Rule("errors_rising", "network", "Interface errors grow by more than", "number", 100, "warning",
+         ev_errors_rising, unit="errors", help="Per device, since the check before. 0 turns it off."),
     # changes
     Rule("conditional_access", "changes", "A Conditional Access policy was added, removed or changed", "switch", True, "warning",
          ev_changes_ca, help="Reported once, when it appears in the change log."),
@@ -931,7 +986,7 @@ def render_example_ini():
         "[email]",
         "; An internal mail relay that accepts mail from this computer without a",
         "; password. Blank = no email. (A relay that needs a login is not supported",
-        "; here on purpose - there are no password fields anywhere in this suite.)",
+        "; here on purpose - this file never holds a password.)",
         "smtp_server =",
         "port = 25",
         "from =",

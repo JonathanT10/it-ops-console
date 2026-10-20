@@ -1,4 +1,4 @@
-"""The six pages. Each renders only its own domain - that's the whole point."""
+"""The pages. Each renders only its own domain - that's the whole point."""
 
 from __future__ import annotations
 
@@ -260,6 +260,19 @@ def build_overview(models, feeds, available, generated):
                           feeds["fleet"], extra))
     else:
         tiles.append(tile("fleet", "Print fleet", "", "", feeds.get("fleet")))
+
+    net = models.get("network")
+    if net:
+        bad = len(net["unreachable"]) + len(net["uplinks_down"])
+        extra = (badge("critical", "warn", "%d down" % bad) if bad
+                 else badge("good", "check", "all answering"))
+        n_sites = len(net["sites"])
+        tiles.append(tile("network", "Network", "%d/%d" % (net["up"], net["total"]),
+                          "switches and access points answering - %d site%s"
+                          % (n_sites, "" if n_sites == 1 else "s"),
+                          feeds["network"], extra))
+    else:
+        tiles.append(tile("network", "Network", "", "", feeds.get("network")))
 
     ch = models.get("changes")
     if ch:
@@ -769,6 +782,76 @@ def build_fleet(m, feed, available, generated, discovery=None):
             + _where_we_look(discovery) + editor_script())
     return shell("Print fleet", "fleet", available, body, generated,
                  subtitle="Which printers need a human today")
+
+
+# --------------------------------------------------------------------------- #
+# Network
+# --------------------------------------------------------------------------- #
+
+def build_network(m, feed, available, generated):
+    if not m:
+        empty = _feed_empty("Network", feed,
+                            "Network checks are optional. To turn them on, copy "
+                            "network.example.ini to network.ini beside run-all.ps1 and list "
+                            "your switches, then save each site's SNMPv3 credential with "
+                            "set-network-credential.ps1 (Run as administrator). The next "
+                            "Refresh picks them up automatically.")
+        return shell("Network", "network", available, empty, generated)
+    cards = _cards([
+        {"k": "Answering", "v": "%d/%d" % (m["up"], m["total"])},
+        {"k": "Not answering", "v": len(m["unreachable"])},
+        {"k": "Uplinks down", "v": len(m["uplinks_down"])},
+        {"k": "Restarted", "v": len(m["rebooted"]), "d": "since the check before"},
+    ])
+
+    att_rows = []
+    for d in m["unreachable"]:
+        att_rows.append([status_badge("unreachable"), esc(d["name"]), esc(d["site"]),
+                         esc(d["detail"]), esc(next_step("network", "unreachable"))])
+    for d, u in m["uplinks_down"]:
+        att_rows.append([badge("critical", "warn", "Uplink down"), esc(d["name"]), esc(d["site"]),
+                         esc("%s (port %s) is %s" % (u["descr"], u["if_index"], u["status_word"])),
+                         esc(next_step("network", "uplink"))])
+    for d in m["rebooted"]:
+        att_rows.append([badge("warning", "warn", "Restarted"), esc(d["name"]), esc(d["site"]),
+                         esc("up %s" % d["uptime_text"]), esc(next_step("network", "rebooted"))])
+    att_html = ('<section><h2>Needs attention</h2>%s</section>'
+                % _table(["Status", "Device", "Site", "Detail", "What to do"], att_rows,
+                         "Every device answered, and every uplink is up."))
+
+    dev_rows = []
+    for d in m["devices"]:
+        ups = "".join(
+            '<div>%s %s</div>' % (badge("good", "check", "up") if u["up"]
+                                  else badge("critical", "warn", u["status_word"]), esc(u["descr"]))
+            for u in d["uplinks"]) or '<span class="muted">&mdash;</span>'
+        if d["error_increase"] is None:
+            errs = '<span class="muted">&mdash;</span>'
+        else:
+            errs = esc(format(d["error_increase"], ","))
+            if d["error_ports"]:
+                errs += '<div class="muted" style="font-size:12px">%s</div>' % esc(", ".join(d["error_ports"]))
+        dev_rows.append([
+            esc(d["name"]) + ('<div class="muted" style="font-size:12px">%s</div>' % esc(d["ip"])),
+            esc(d["site"]),
+            status_badge(d["status"]),
+            esc(d["uptime_text"]),
+            esc("%d/%d" % (d["ifaces_up"], d["ifaces_total"])) if d["ifaces_total"] else '<span class="muted">&mdash;</span>',
+            ups,
+            errs,
+            esc(d["checked_text"]),
+        ])
+    dev_html = ('<section><h2>All devices</h2>'
+                '<p class="note">Asked over SNMPv3, read-only. Uplinks are the ports listed under '
+                '[uplinks] in network.ini. Errors are counted since the check before; a device '
+                'that restarted starts its counters again, so it shows none this time. '
+                '&ldquo;Not checked&rdquo; means a device was not part of the latest check.</p>%s</section>'
+                % _table(["Device", "Site", "Status", "Uptime", "Ports up", "Uplinks",
+                          "#Errors since last check", "Last checked"], dev_rows))
+
+    body = freshness_chip(feed.state, feed.age, "Last check") + cards + att_html + dev_html
+    return shell("Network", "network", available, body, generated,
+                 subtitle="Which switches and access points need a human today")
 
 
 # --------------------------------------------------------------------------- #

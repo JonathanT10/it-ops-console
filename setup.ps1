@@ -26,9 +26,12 @@
       8. Offer to run that first collection right away - press Enter and
          you go from "installed" to looking at your own data in one motion
 
-    Everything the collectors do against your tenant is READ-ONLY. Nothing
-    here stores a password - you sign in interactively when data is collected,
-    or, if you choose it, a certificate that never leaves this computer does.
+    Everything the collectors do against your tenant is READ-ONLY. No
+    Microsoft 365 password is stored - you sign in interactively when data is
+    collected, or, if you choose it, a certificate that never leaves this
+    computer does. The one stored secret in the suite is the optional network
+    check's SNMPv3 credential, which set-network-credential.ps1 saves
+    encrypted by Windows in the locked output folder; setup never asks for it.
 
     Works in Windows PowerShell 5.1 (what "right-click > Run with PowerShell"
     gives you) and in PowerShell 7.
@@ -122,7 +125,7 @@ if ($isUpdate) {
 } else {
     Write-Host 'This will download five small open-source tools, wire them together,'
     Write-Host 'and put two shortcuts on your desktop. Collection against your tenant'
-    Write-Host 'is read-only, and you sign in yourself - nothing stores a password.'
+    Write-Host 'is read-only, and you sign in yourself - no Microsoft 365 password is stored.'
     Write-Host ''
     Write-Host 'It asks ONE question now and two at the end. When the window pauses,'
     Write-Host 'it is waiting for you - pressing Enter accepts the suggested answer.'
@@ -627,6 +630,8 @@ licensing_history = history\licensing
 refresh_status    = refresh-status.json
 # The printer collector writes this when config.ini names places to look.
 fleet_discovery   = fleet-discovery.json
+# The network check writes this when network.ini lists switches.
+network           = network.db
 "@
 Set-Content -Path (Join-Path $consoleDir 'sources.ini') -Value $sources -Encoding UTF8
 Write-Host "  wrote $((Join-Path $consoleDir 'sources.ini'))"

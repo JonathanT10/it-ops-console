@@ -24,6 +24,7 @@ share or point IIS at it and you have a console.
 | `security-snapshot.json` | [entra-security-snapshot](https://github.com/JonathanT10/entra-security-snapshot) `-JsonPath` | Security |
 | `licensing.json` | [m365-license-waste-report](https://github.com/JonathanT10/m365-license-waste-report) `-JsonPath` | Licensing |
 | `fleet.db` | [print-fleet-dashboard](https://github.com/JonathanT10/print-fleet-dashboard) `collector.py` | Print fleet |
+| `network.db` | this repo's `network/collector.py` (SNMPv3) | Network |
 
 Every feed is optional. Configure two and you get two pages; the rest are
 greyed out in the nav and labelled "not configured" rather than showing
@@ -67,6 +68,10 @@ in 48 hours marked offline regardless of what its last snapshot said. Plus
 **Where we look**: name a subnet, a span or a single address and the next
 refresh finds the printers on it for you — see *Finding printers* below.
 
+**Network** — every switch and access point listed in `network.ini`: answering
+or not, uptime, ports up, the uplinks you named and whether each is up, and
+interface errors added since the check before. See *Network health* below.
+
 **What changed** — the console recomputes the diff from the archived snapshots
 rather than trusting a pre-baked list, so it stays correct even when the export
 that wrote `run-summary.json` is older than the history folder. Conditional
@@ -105,6 +110,44 @@ once, so you know it worked) and *a place to look could not be scanned*.
 
 Polling now runs eight printers at a time, so a fleet that discovery grew does
 not spend one device's timeout after another.
+
+## Network health
+
+An optional check of your switches and access points over **SNMPv3** (SHA
+authentication, AES-128 privacy — what UniFi offers). Each refresh asks every
+device for its uptime and name and reads its interface table: which ports are
+up, and their error counters. Read-only, like everything else here.
+
+To turn it on, on the computer that refreshes the console:
+
+1. Copy `network.example.ini` to `network.ini` beside `run-all.ps1`, and list
+   your devices, one `[site:<name>]` section per site, plus the ports that are
+   uplinks under `[uplinks]`. No password goes in this file.
+2. For each site, open PowerShell with **Run as administrator** and run
+   `set-network-credential.ps1` from the console folder. It asks for the site,
+   the SNMPv3 user and the password (from that site's LastPass item) without
+   showing it, encrypts them with Windows (DPAPI, machine scope), and saves
+   `network-credential.bin` in the output folder. Running it again for a site
+   replaces that site and keeps the others.
+
+The next refresh adds a **Network** tab and four alert rules: a device not
+answering, an uplink down, a device that restarted (said once), and interface
+errors growing past a number you choose.
+
+**The credential is the one stored secret in this suite**, and it is handled
+as one. It is encrypted to this computer, so a copy of the file is useless
+anywhere else; it sits in the output folder that setup locks to you,
+Administrators and SYSTEM (`check-setup.ps1` checks all three: that it exists,
+that it opens here, and who can read it); and it is never written to the repo,
+the logs, the pages, `network.db` or an alert. The collector decrypts it in
+memory for the run and never prints it, even in an error.
+
+Three outcomes are kept apart, because the next move is different for each:
+a device that **did not answer** is recorded as unreachable; a device that
+**answered and refused the credential** is not marked down (exit 5 — fix the
+credential); and a run that **could not check anything** — the SNMP library
+missing (exit 3), or the credential missing or unreadable (exit 4) — writes
+nothing at all, so no switch is marked down by a problem on this computer.
 
 ## Posture over time
 
@@ -193,9 +236,10 @@ already points at everything else, and puts two shortcuts on your desktop:
 
 ![Refresh progress](docs/refresh-status.png)
 
-Nothing stores a password: collection is read-only and you sign in
+No Microsoft 365 password is stored: collection is read-only and you sign in
 interactively each refresh (or, if you choose it below, a certificate that
-never leaves the computer does). Works in Windows PowerShell 5.1 — the one
+never leaves the computer does). The only stored secret in the suite is the
+optional network check's SNMPv3 credential — see *Network health*. Works in Windows PowerShell 5.1 — the one
 "right-click → Run with PowerShell" actually launches — as well as
 PowerShell 7. Printers are optional; add their IPs to
 `tools\print-fleet-dashboard\config.ini` whenever you get to it.
@@ -230,8 +274,8 @@ answers, and re-running setup lets you change your mind:
    write to your tenant stays a human step, on purpose, because everything
    else here is read-only. It then **proves the sign-in works** (reads your
    organisation's name) before scheduling anything, and the job runs as
-   SYSTEM, which the folder lock below already trusts. No password anywhere;
-   the certificate lasts two years, and the console and `check-setup.ps1` warn
+   SYSTEM, which the folder lock below already trusts. No Microsoft 365
+   password anywhere; the certificate lasts two years, and the console and `check-setup.ps1` warn
    you 30 days before it expires — re-run setup then and it makes a new one.
 
 Whatever the answer, `run-all.ps1` tries the routes it has in order — the
@@ -354,8 +398,8 @@ test fails if the two drift. Adding a channel is one function.
 **Security.** The Workflows URL lets anyone holding it post into that channel,
 so it lives in `alerts.ini` under the folder lock (you, Administrators, SYSTEM);
 set `ITOPS_TEAMS_WEBHOOK` in the environment instead if you would rather keep it
-out of a file. Email is relay-only by design — there are no username or password
-fields anywhere here, so a relay that requires a login is out of scope. Alert text
+out of a file. Email is relay-only by design — `alerts.ini` has no username or
+password fields, so a relay that requires a login is out of scope. Alert text
 carries admin names and UPNs, the same as the console; pick a channel whose
 members should see that. Names are neutralised so a hostile display name cannot
 become a link in a card.
@@ -462,10 +506,12 @@ The collected data — admin names, stale-account lists, the app inventory — l
 under the install folder (`C:\IT-Ops` by default). A folder under `C:\` is
 readable by every local user out of the box, and that read access is the real
 exposure, so **setup locks the install folder to the person who installed it,
-`Administrators`, and `SYSTEM`; every other local user is shut out.** No secret
-is stored either way — collection is read-only and reads credential *names* and
-expiry dates, never a secret value — so this is about who can read findings, not
-credential theft. `check-setup.ps1` flags it if that lock is ever missing.
+`Administrators`, and `SYSTEM`; every other local user is shut out.** The
+Microsoft 365 collection stores no secret — it is read-only and reads credential
+*names* and expiry dates, never a secret value — so for that data this is about
+who can read findings. The one exception is the network check's SNMPv3
+credential: it lives in the output folder, encrypted by Windows, and this lock
+is what keeps other local users from opening it. `check-setup.ps1` flags it if that lock is ever missing.
 
 Two things this ACL implies. Setup's unattended schedule runs as `SYSTEM`,
 which is already in the lock; if you instead run a **scheduled refresh as some
@@ -478,7 +524,9 @@ on that subfolder yourself; the default assumes the console stays local.
 
 **The console is a renderer, nothing more.** It has no credentials, no network
 calls, and no scheduler (`notify.py`, the alert sender, is a separate program
-run after the build, and is the only thing here that sends anything). That boundary is deliberate: collection is where the
+run after the build, and is the only thing here that sends anything;
+`network/collector.py`, the switch check, is a separate collector that
+`run-all.ps1` runs before the build, like the printer one). That boundary is deliberate: collection is where the
 permissions, the rate limits, and the failure modes live, and keeping it out of
 the renderer means the console cannot be the reason a run failed. It also means
 you can rebuild the site from yesterday's JSON to see exactly what it looked
@@ -502,13 +550,21 @@ last week's build against today's shows you real drift and not churn.
 
 ```
 python tests/test_console.py
+python tests/test_network.py
 python tests/test_notify.py
 python tests/test_apply_alerts.py
 pwsh tests/test_run_all_signin.ps1
 pwsh tests/test_schedule_refresh.ps1
 ```
 
-`test_console.py` (223 checks) covers freshness classification, timestamp
+`test_network.py` (45 checks) covers the network collector: pysnmp imported in
+exactly one place; a run that can check nothing (library missing, credential
+missing or unreadable) writing nothing at all; "did not answer" recorded,
+while "refused the credential" and "a fault on this side" are not; the
+per-device deadline and the concurrency cap; the password appearing nowhere;
+and a real SNMPv3 SHA/AES-128 poll against a local `snmpsim` (when snmpsim is
+not installed those checks print `SKIP UNVERIFIED-live` rather than passing).
+`test_console.py` (353 checks) covers freshness classification, timestamp
 parsing, feed degradation (corrupt JSON, missing files, unconfigured sources),
 every model, change detection, rendering with zero feeds configured, HTML
 escaping of hostile input, the automatic-refresh footer note and banners, the

@@ -142,7 +142,8 @@ function Get-Item {
 
 function Run-Case {
     param([string]$Graph, [string]$CertNotAfter, [string]$IniText, [switch]$Desktop, [switch]$NoConnect, [switch]$NoKey, [int]$Timeout = 30, [int]$StepTimeout = 0,
-          [string]$UpdateCache, [string]$CertMemo, [int]$FleetExit = -1, [string]$FleetSays)
+          [string]$UpdateCache, [string]$CertMemo, [int]$FleetExit = -1, [string]$FleetSays,
+          [int]$NetExit = -1, [string]$NetSays)
     if (Test-Path $log) { Remove-Item $log }
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     if (Test-Path $site) { Remove-Item $site -Recurse -Force }
@@ -172,6 +173,26 @@ print(r'''$says''')
 sys.exit($FleetExit)
 "@
     }
+    # The network step reads network.ini beside run-all.ps1 - the REAL repo,
+    # which a test must never write into. So -NetExit stands up a stub folder
+    # of its own (a network.ini and a collector that exits as asked and prints
+    # what it was handed) and points run-all at it with -NetworkConfig and
+    # -NetworkCollector. Without -NetExit the repo has no network.ini, so the
+    # step is skipped - which is what every other case relies on.
+    $netFlags = ''
+    if ($NetExit -ge 0) {
+        $netDir = Join-Path $work 'net'
+        $null = New-Item -ItemType Directory -Path $netDir -Force
+        Set-Content (Join-Path $netDir 'network.ini') "[site:dfw]`ncredential = dfw`nCore = 192.0.2.2`n"
+        $nsays = if ($NetSays) { $NetSays } else { 'stub network' }
+        Set-Content (Join-Path $netDir 'collector.py') @"
+import sys
+print(r'''$nsays''')
+print('ARGS ' + ' | '.join(sys.argv[1:]))
+sys.exit($NetExit)
+"@
+        $netFlags = "-NetworkConfig '$(Join-Path $netDir 'network.ini')' -NetworkCollector '$(Join-Path $netDir 'collector.py')'"
+    }
     $env:ITOPS_STUB_GRAPH = $Graph
     $env:ITOPS_STUB_CERT_NOTAFTER = $CertNotAfter
     $env:ITOPS_STUB_CERT_NOKEY = if ($NoKey) { '1' } else { $null }
@@ -179,7 +200,7 @@ sys.exit($FleetExit)
     if (-not $Desktop) { $flags += '-Scheduled' }
     if ($NoConnect) { $flags += '-NoConnect' }
     if ($StepTimeout) { $flags += @('-StepTimeoutMinutes', "$StepTimeout") }
-    $cmd = $preamble + "`n& '$repo/run-all.ps1' -ToolRoot '$tools' -OutputRoot '$out' -SitePath '$site' -ConfigPath '$cfg' -RefreshConfig '$ini' -Python $python -NoStatusPage -SignInTimeoutSeconds $Timeout $($flags -join ' ')"
+    $cmd = $preamble + "`n& '$repo/run-all.ps1' -ToolRoot '$tools' -OutputRoot '$out' -SitePath '$site' -ConfigPath '$cfg' -RefreshConfig '$ini' -Python $python -NoStatusPage -SignInTimeoutSeconds $Timeout $($flags -join ' ') $netFlags"
     $text = (& pwsh -NoProfile -Command $cmd 2>&1 | Out-String)
     $code = $LASTEXITCODE
     $status = $null
@@ -876,6 +897,46 @@ $r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -FleetExit 0 -FleetSay
 $fleetStep = @($r.Status.Steps | Where-Object { $_.Step -eq 'print-fleet-collector' })
 Check '15 ok' ($fleetStep.Count -eq 1 -and $fleetStep[0].Status -eq 'ok')
 Check '15 and no library talk anywhere' ($r.Text -notlike '*pysnmp*')
+$netStep = @($r.Status.Steps | Where-Object { $_.Step -eq 'network-health' })
+Check '15 with no network.ini the network step is skipped, in words' (
+    $netStep.Count -eq 1 -and $netStep[0].Status -eq 'skipped' -and $netStep[0].Detail -like '*network.ini*')
+
+Write-Host ''
+Write-Host '-- 16. the network check could not use the SNMP library (exit 3)'
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -NetExit 3 -NetSays '[x] The network devices could not be checked.'
+$netStep = @($r.Status.Steps | Where-Object { $_.Step -eq 'network-health' })
+Check '16 the step is recorded as failed' ($netStep.Count -eq 1 -and $netStep[0].Status -eq 'FAILED')
+Check '16 the plain words are about the library' (
+    $r.Text -like '*network devices were not checked at all*' -and $r.Text -like '*pysnmp*')
+Check '16 they say nothing was marked down' ($r.Text -like '*Nothing was marked down*')
+Check '16 and are not the printer sentence' ($r.Text -notlike '*No printer has been marked offline*')
+
+Write-Host ''
+Write-Host '-- 17. the network credential is missing or cannot be opened (exit 4)'
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -NetExit 4 -NetSays '[x] The network devices could not be checked.'
+$netStep = @($r.Status.Steps | Where-Object { $_.Step -eq 'network-health' })
+Check '17 the step is recorded as failed' ($netStep.Count -eq 1 -and $netStep[0].Status -eq 'FAILED')
+Check '17 the plain words send a person to set-network-credential.ps1, as administrator' (
+    $r.Text -like '*set-network-credential.ps1*' -and $r.Text -like '*Run as administrator*' -and $r.Text -like '*LastPass*')
+Check '17 they say nothing was marked down' ($r.Text -like '*Nothing was marked down*')
+Check '17 and not the library sentence' ($r.Text -notlike '*pysnmp*')
+
+Write-Host ''
+Write-Host '-- 18. a network check that works is ok, and is handed paths - never a password'
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -NetExit 0 -NetSays 'Done: 1 answered, 0 unreachable.'
+$netStep = @($r.Status.Steps | Where-Object { $_.Step -eq 'network-health' })
+Check '18 ok' ($netStep.Count -eq 1 -and $netStep[0].Status -eq 'ok')
+$argLine = "$(@($r.Text -split "`n" | Where-Object { $_ -like '*ARGS *' }) | Select-Object -First 1)".Trim()
+Check '18 it is told where the encrypted credential is, in the output folder' (
+    $argLine -like "*--secret | $(Join-Path $out 'network-credential.bin')")
+Check '18 and writes network.db in the output folder' ($argLine -like "*--db | $(Join-Path $out 'network.db') |*")
+Check '18 and nothing else rides on its command line' (@($argLine -split ' \| ').Count -eq 6)
+
+Write-Host ''
+Write-Host '-- 19. a device refused the credential (exit 5)'
+$r = Run-Case -Graph 'user-ok' -IniText $iniKeep -Desktop -NetExit 5 -NetSays '[x] Core: answered but refused the dfw credential'
+Check '19 the plain words say it was not marked down, and how to re-enter it' (
+    $r.Text -like '*refused the saved SNMPv3 credential*' -and $r.Text -like '*NOT marked down*' -and $r.Text -like '*set-network-credential.ps1*')
 
 Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue

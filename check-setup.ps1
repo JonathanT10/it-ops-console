@@ -288,6 +288,80 @@ if ($printersListed) {
         Gap "printers are listed but the SNMP library is missing for $who - the printer page cannot update. From a PowerShell window opened with Run as administrator: `$env:PYTHONNOUSERSITE=1; & ""$py"" -m pip install ""pysnmp>=7.1"""
     }
 }
+# ---- network ---- #
+# Only when network.ini actually lists switches (it differs from the example).
+# Three questions: is the SNMPv3 credential saved, does it open on THIS
+# computer (it is encrypted to the machine), and can only you, Administrators
+# and SYSTEM read the file. The credential's contents are never printed - only
+# which sites it covers.
+$consoleDir = Join-Path $tools 'it-ops-console'
+$netIni = Join-Path $consoleDir 'network.ini'
+$netEx  = Join-Path $consoleDir 'network.example.ini'
+$credFile = Join-Path $output 'network-credential.bin'
+$networkOn = (Test-Path $netIni) -and (-not (Test-Path $netEx) -or
+    (((Get-Content $netIni -Raw) -replace '\s', '') -ne ((Get-Content $netEx -Raw) -replace '\s', '')))
+$resave = "on this computer, from a PowerShell window opened with Run as administrator: & '$(Join-Path $consoleDir 'set-network-credential.ps1')'"
+if ($networkOn) {
+    # Which credential each [site:...] section uses: its "credential =" line,
+    # or the site's own name when there is none (what the collector does).
+    $credOf = [ordered]@{}
+    $sec = ''
+    foreach ($raw in Get-Content $netIni) {
+        $l = $raw.Trim()
+        if ($l -match '^\[(.+)\]$') {
+            $sec = $matches[1].Trim().ToLower()
+            if ($sec -like 'site:*') { $credOf[$sec] = $sec.Substring(5).Trim() }
+            continue
+        }
+        if ($sec -like 'site:*' -and $l -match '^credential\s*=\s*(\S+)') { $credOf[$sec] = $matches[1].ToLower() }
+    }
+    $wanted = @($credOf.Values)
+    if (-not (Test-Path $credFile)) {
+        Gap "network.ini lists switches but no SNMPv3 credential is saved, so the network check cannot run - $resave"
+    } else {
+        $sites = @()
+        $plain = $null
+        try {
+            Add-Type -AssemblyName System.Security
+            $plain = [System.Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($credFile), $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+            $sites = @(([Text.Encoding]::UTF8.GetString($plain) | ConvertFrom-Json).PSObject.Properties.Name | ForEach-Object { "$_".ToLower() })
+            Say "network credential opens on this computer (sites: $($sites -join ', '))"
+            $missing = @($wanted | Where-Object { $sites -notcontains $_ } | Sort-Object -Unique)
+            if ($missing.Count) { Gap "network.ini names site(s) with no saved credential: $($missing -join ', ') - $resave" }
+        } catch {
+            Gap "the saved network credential cannot be opened on this computer (it only opens on the machine that saved it) - $resave"
+        } finally {
+            if ($plain) { [Array]::Clear($plain, 0, $plain.Length) }
+        }
+        # Who may read it: the people setup's folder lock names, and nobody
+        # else. "The installer" is whoever setup gave its own entry on the
+        # install folder - so read that rather than guess.
+        try {
+            $sidType = [System.Security.Principal.SecurityIdentifier]
+            $allowed = @('S-1-5-32-544', 'S-1-5-18')
+            $allowed += @((Get-Acl $root).GetAccessRules($true, $false, $sidType) | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { $_.IdentityReference.Value })
+            $extra = @((Get-Acl $credFile).GetAccessRules($true, $true, $sidType) | Where-Object {
+                $_.AccessControlType -eq 'Allow' -and $allowed -notcontains $_.IdentityReference.Value })
+            if ($extra.Count) {
+                $who = @($extra | ForEach-Object { try { $_.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } catch { $_.IdentityReference.Value } }) | Sort-Object -Unique
+                Gap "the network credential file can be read by more than you, Administrators and SYSTEM ($($who -join ', ')) - re-run setup to restore the folder lock"
+            } else {
+                Say 'the network credential file is readable only by you, Administrators and SYSTEM'
+            }
+        } catch {
+            Note "could not read the permissions on $credFile ($($_.Exception.Message))"
+        }
+    }
+    if ($py) {
+        if (Test-PythonHasModule $py 'pysnmp' -MachineWide) { Say 'network checks: the SNMP library is installed for the whole computer' }
+        elseif ($mode -eq 'unattended') { Gap "the SNMP library is not installed for the whole computer, and the daily refresh runs as SYSTEM - so the network step fails every morning. From a PowerShell window opened with Run as administrator: `$env:PYTHONNOUSERSITE=1; & ""$py"" -m pip install ""pysnmp>=7.1""" }
+        elseif (Test-PythonHasModule $py 'pysnmp') { Say 'network checks: the SNMP library is installed for this account' }
+        else { Gap "network.ini lists switches but the SNMP library is missing - from a PowerShell window opened with Run as administrator: `$env:PYTHONNOUSERSITE=1; & ""$py"" -m pip install ""pysnmp>=7.1""" }
+    }
+} elseif (Test-Path $credFile) {
+    Note 'a network credential is saved, but network.ini lists no switches - the network check is off until it does'
+}
+
 # ---- alerts ---- #
 $alertsIni = Join-Path (Join-Path $tools 'it-ops-console') 'alerts.ini'
 if (Test-Path $alertsIni) {

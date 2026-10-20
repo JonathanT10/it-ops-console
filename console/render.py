@@ -233,6 +233,7 @@ PAGES = [
     ("security",  "Security"),
     ("licensing", "Licensing"),
     ("fleet",     "Print fleet"),
+    ("network",   "Network"),
     ("changes",   "What changed"),
     ("alerts",    "Alerts"),
 ]
@@ -267,6 +268,10 @@ STATUS_BADGE = {
     "warning":  lambda: badge("warning", "warn", "Warning"),
     "error":    lambda: badge("critical", "warn", "Error"),
     "offline":  lambda: muted_badge("Offline"),
+    # Network devices: answered, did not answer, or not part of the last check.
+    "up":          lambda: badge("good", "check", "Up"),
+    "unreachable": lambda: badge("critical", "warn", "Unreachable"),
+    "stale":       lambda: muted_badge("Not checked"),
     "enabled":  lambda: badge("good", "check", "Enabled"),
     "disabled": lambda: muted_badge("Disabled"),
     "enabledForReportingButNotEnforced": lambda: badge("warning", "eye", "Report-only"),
