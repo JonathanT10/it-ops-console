@@ -129,6 +129,12 @@ To turn it on, on the computer that refreshes the console:
    showing it, encrypts them with Windows (DPAPI, machine scope), and saves
    `network-credential.bin` in the output folder. Running it again for a site
    replaces that site and keeps the others.
+3. Make sure Python has **both** `pysnmp` and `cryptography` (setup offers to
+   install them; `check-setup.ps1` says whether it can see them). pysnmp does
+   SNMPv3's AES encryption through `cryptography` but does not install it, so
+   with pysnmp alone every device fails with "Ciphering services not
+   available". The collector reports that as a missing library (exit 3,
+   nothing marked down), never as devices that are down.
 
 The next refresh adds a **Network** tab and four alert rules: a device not
 answering, an uplink down, a device that restarted (said once), and interface
@@ -146,7 +152,7 @@ Three outcomes are kept apart, because the next move is different for each:
 a device that **did not answer** is recorded as unreachable; a device that
 **answered and refused the credential** is not marked down (exit 5 — fix the
 credential); and a run that **could not check anything** — the SNMP library
-missing (exit 3), or the credential missing or unreadable (exit 4) — writes
+or `cryptography` missing (exit 3), or the credential missing or unreadable (exit 4) — writes
 nothing at all, so no switch is marked down by a problem on this computer.
 
 ## Posture over time
@@ -557,8 +563,9 @@ pwsh tests/test_run_all_signin.ps1
 pwsh tests/test_schedule_refresh.ps1
 ```
 
-`test_network.py` (45 checks) covers the network collector: pysnmp imported in
-exactly one place; a run that can check nothing (library missing, credential
+`test_network.py` (51 checks) covers the network collector: pysnmp imported in
+exactly one place; a run that can check nothing (pysnmp or cryptography
+missing, or pysnmp unable to encrypt; credential
 missing or unreadable) writing nothing at all; "did not answer" recorded,
 while "refused the credential" and "a fault on this side" are not; the
 per-device deadline and the concurrency cap; the password appearing nowhere;

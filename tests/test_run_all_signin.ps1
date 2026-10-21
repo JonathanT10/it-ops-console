@@ -909,6 +909,7 @@ Check '16 the step is recorded as failed' ($netStep.Count -eq 1 -and $netStep[0]
 Check '16 the plain words are about the library' (
     $r.Text -like '*network devices were not checked at all*' -and $r.Text -like '*pysnmp*')
 Check '16 they say nothing was marked down' ($r.Text -like '*Nothing was marked down*')
+Check '16 and name cryptography too - pysnmp alone cannot do SNMPv3 AES' ($r.Text -like '*cryptography*')
 Check '16 and are not the printer sentence' ($r.Text -notlike '*No printer has been marked offline*')
 
 Write-Host ''

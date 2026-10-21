@@ -522,32 +522,44 @@ try {
             }
             Write-Host "  it works: signed in as the app and read '$orgName'."
 
-            # ---- 5. the printer library, if printers are in use ---- #
+            # ---- 5. the SNMP library, if printers or switches are in use ---- #
             $pyExe = Resolve-PythonExe $Python
             $fleetCfg = Join-Path (Join-Path $tools 'print-fleet-dashboard') 'config.ini'
             $fleetEx  = Join-Path (Join-Path $tools 'print-fleet-dashboard') 'config.example.ini'
             $printersOn = (Test-Path $fleetCfg) -and (-not (Test-Path $fleetEx) -or
                 ((Get-Content $fleetCfg -Raw) -replace '\s', '') -ne ((Get-Content $fleetEx -Raw) -replace '\s', ''))
-            if ($printersOn -and $pyExe) {
+            # The network check needs cryptography as well: pysnmp does SNMPv3 AES
+            # through it and does not install it (20 Oct 2026 - every switch read
+            # "Ciphering services not available"). Same test check-setup uses.
+            $netIni = Join-Path (Join-Path $tools 'it-ops-console') 'network.ini'
+            $netEx  = Join-Path (Join-Path $tools 'it-ops-console') 'network.example.ini'
+            $networkOn = (Test-Path $netIni) -and (-not (Test-Path $netEx) -or
+                ((Get-Content $netIni -Raw) -replace '\s', '') -ne ((Get-Content $netEx -Raw) -replace '\s', ''))
+            if (($printersOn -or $networkOn) -and $pyExe) {
                 # Two questions, not one. This branch schedules a job that runs as
                 # the computer, so "can I import it" is the wrong question, and
                 # "installed only for your account" is not a fact until asked.
                 $snmpMine     = Test-PythonHasModule $pyExe 'pysnmp'
                 $snmpEveryone = Test-PythonHasModule $pyExe 'pysnmp' -MachineWide
+                if ($networkOn) {
+                    $snmpMine     = $snmpMine -and (Test-PythonHasModule $pyExe 'cryptography')
+                    $snmpEveryone = $snmpEveryone -and (Test-PythonHasModule $pyExe 'cryptography' -MachineWide)
+                }
                 if ($snmpEveryone) {
-                    Write-Host '  printer support (pysnmp): visible to the computer, so the daily refresh can check printers.'
+                    Write-Host '  SNMP support: visible to the computer, so the daily refresh can check printers and switches.'
                 } else {
                     if ($snmpMine) {
-                        Write-Warning '  The printer library (pysnmp) is installed for YOUR account only, so the daily'
-                        Write-Warning '  refresh - which runs as the computer - will not be able to check the printers.'
+                        Write-Warning '  The SNMP library is installed for YOUR account only, so the daily refresh -'
+                        Write-Warning '  which runs as the computer - will not be able to check printers or switches.'
                     } else {
-                        Write-Warning '  The printer library (pysnmp) is not installed, so the daily refresh will not be'
-                        Write-Warning '  able to check the printers.'
+                        Write-Warning '  The SNMP library (pysnmp) is not installed (or, for switches, its encryption'
+                        Write-Warning '  part, cryptography, is missing), so the daily refresh will not be able to'
+                        Write-Warning '  check printers or switches.'
                     }
-                    Write-Warning '  Nothing else is affected, and no printer is reported offline because of it.'
+                    Write-Warning '  Nothing else is affected, and nothing is reported offline because of it.'
                     Write-Warning '  To fix it, from a window opened with "Run as administrator". The variable is'
                     Write-Warning '  what stops pip finding your own copy and installing nothing:'
-                    Write-Warning "     `$env:PYTHONNOUSERSITE=1; & `"$pyExe`" -m pip install `"pysnmp>=7.1`""
+                    Write-Warning "     `$env:PYTHONNOUSERSITE=1; & `"$pyExe`" -m pip install $(if ($networkOn) { '"pysnmp>=7.1" "cryptography>=43"' } else { '"pysnmp>=7.1"' })"
                 }
             }
 

@@ -23,7 +23,10 @@ Exit codes - each one says in plain words what happened:
        credential in it                   - nothing contacted, nothing written
     5  a device answered but refused the credential - nothing recorded for it
 
-Requires: pip install "pysnmp>=7.1" (for the whole computer - see README).
+Requires: pip install "pysnmp>=7.1" "cryptography>=43" (for the whole computer -
+see README). pysnmp does its AES privacy through cryptography but does not
+install it, so without it every device fails with "Ciphering services not
+available" - that is a missing library, never a device that is down.
 """
 
 from __future__ import annotations
@@ -75,6 +78,12 @@ class Refused(Exception):
     """The device answered and refused the credential."""
 
 
+class CipherUnavailable(ImportError):
+    """pysnmp could not encrypt the request on THIS computer (its AES needs the
+    cryptography package). Nothing was sent, so nothing is known about the
+    device. An ImportError, so it is reported exactly like a missing library."""
+
+
 class Credential:
     """A user name and password, held for one run.
 
@@ -112,6 +121,10 @@ def import_snmp():
         SnmpEngine, UsmUserData, usmHMACSHAAuthProtocol, usmAesCfb128Protocol,
         UdpTransportTarget, ContextData, ObjectType, ObjectIdentity, get_cmd, walk_cmd,
     )
+    # pysnmp's AES privacy is built on this, and pysnmp does not install it.
+    # Asking here means a computer without it stops before any device is
+    # contacted, instead of filing every device as unreachable.
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms  # noqa: F401
     return SimpleNamespace(
         SnmpEngine=SnmpEngine, UsmUserData=UsmUserData,
         usmHMACSHAAuthProtocol=usmHMACSHAAuthProtocol,
@@ -124,8 +137,9 @@ def import_snmp():
 def snmp_missing_words(error):
     return "\n".join([
         "",
-        "  The network check needs a piece of Python called pysnmp, and the",
-        "  account that ran this cannot see it (%s)." % type(error).__name__,
+        "  The network check needs two pieces of Python, pysnmp and cryptography",
+        "  (pysnmp encrypts with it), and the account that ran this cannot see",
+        "  one of them (%s)." % type(error).__name__,
         "",
         "  NOTHING WAS CHANGED. No switch was contacted, nothing was written",
         "  down, and nothing has been marked down - the Network page still shows",
@@ -134,7 +148,7 @@ def snmp_missing_words(error):
         "  Install it for the WHOLE COMPUTER. In a PowerShell window opened with",
         "  'Run as administrator', on this computer:",
         "",
-        '      & "%s" -m pip install "pysnmp>=7.1"' % sys.executable,
+        '      & "%s" -m pip install "pysnmp>=7.1" "cryptography>=43"' % sys.executable,
         "",
     ])
 
@@ -151,6 +165,9 @@ def require_snmp():
 
 def _indication(err_ind):
     name = type(err_ind).__name__
+    if name == "EncryptionError":
+        # pysnmp could not encrypt the request here - nothing left this computer.
+        return CipherUnavailable("pysnmp could not encrypt (%s)" % err_ind)
     if name in REFUSED_INDICATIONS:
         return Refused(name)
     # errind messages are fixed library text ("No SNMP response received
@@ -442,8 +459,8 @@ def main(argv=None):
                     if down_ports else ""))
                 up += 1
             elif isinstance(error, ImportError):
-                print("[x] %s: could not be checked - the SNMP library failed part-way. "
-                      "Nothing recorded; NOT marked down." % label)
+                print("[x] %s: could not be checked - the SNMP library failed on this "
+                      "computer (%s). Nothing recorded; NOT marked down." % (label, type(error).__name__))
                 library_gone = True
                 broke += 1
             elif isinstance(error, Refused):
@@ -478,6 +495,7 @@ def main(argv=None):
     print("Done: %d answered, %d unreachable, %d refused the credential, %d not checked."
           % (up, down, refused, broke))
     if library_gone:
+        print(snmp_missing_words(next(e for _, _, e in results if isinstance(e, ImportError))))
         return SNMP_MISSING_EXIT
     if refused:
         print("  A device that refuses the credential was NOT marked down. Re-enter that "

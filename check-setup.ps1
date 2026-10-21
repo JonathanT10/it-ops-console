@@ -300,7 +300,9 @@ $netEx  = Join-Path $consoleDir 'network.example.ini'
 $credFile = Join-Path $output 'network-credential.bin'
 $networkOn = (Test-Path $netIni) -and (-not (Test-Path $netEx) -or
     (((Get-Content $netIni -Raw) -replace '\s', '') -ne ((Get-Content $netEx -Raw) -replace '\s', '')))
-$resave = "on this computer, from a PowerShell window opened with Run as administrator: & '$(Join-Path $consoleDir 'set-network-credential.ps1')'"
+# -ExecutionPolicy Bypass -File, not "& script": a machine whose policy only runs
+# signed scripts refuses "&" (seen on the desktop, 20 Oct 2026).
+$resave = "on this computer, from a PowerShell window opened with Run as administrator: powershell -NoProfile -ExecutionPolicy Bypass -File ""$(Join-Path $consoleDir 'set-network-credential.ps1')"""
 if ($networkOn) {
     # Which credential each [site:...] section uses: its "credential =" line,
     # or the site's own name when there is none (what the collector does).
@@ -353,10 +355,16 @@ if ($networkOn) {
         }
     }
     if ($py) {
-        if (Test-PythonHasModule $py 'pysnmp' -MachineWide) { Say 'network checks: the SNMP library is installed for the whole computer' }
-        elseif ($mode -eq 'unattended') { Gap "the SNMP library is not installed for the whole computer, and the daily refresh runs as SYSTEM - so the network step fails every morning. From a PowerShell window opened with Run as administrator: `$env:PYTHONNOUSERSITE=1; & ""$py"" -m pip install ""pysnmp>=7.1""" }
-        elseif (Test-PythonHasModule $py 'pysnmp') { Say 'network checks: the SNMP library is installed for this account' }
-        else { Gap "network.ini lists switches but the SNMP library is missing - from a PowerShell window opened with Run as administrator: `$env:PYTHONNOUSERSITE=1; & ""$py"" -m pip install ""pysnmp>=7.1""" }
+        # Two libraries, not one: pysnmp does SNMPv3 AES through cryptography and
+        # does not install it. With pysnmp alone this used to say "installed"
+        # while every switch failed "Ciphering services not available" (20 Oct 2026).
+        $netFix = "From a PowerShell window opened with Run as administrator: `$env:PYTHONNOUSERSITE=1; & ""$py"" -m pip install ""pysnmp>=7.1"" ""cryptography>=43"""
+        $netEveryone = (Test-PythonHasModule $py 'pysnmp' -MachineWide) -and (Test-PythonHasModule $py 'cryptography' -MachineWide)
+        $netMine = (Test-PythonHasModule $py 'pysnmp') -and (Test-PythonHasModule $py 'cryptography')
+        if ($netEveryone) { Say 'network checks: the SNMP libraries (pysnmp + cryptography) are installed for the whole computer' }
+        elseif ($mode -eq 'unattended') { Gap "the SNMP libraries (pysnmp + cryptography) are not both installed for the whole computer, and the daily refresh runs as SYSTEM - so the network step fails every morning. $netFix" }
+        elseif ($netMine) { Say 'network checks: the SNMP libraries (pysnmp + cryptography) are installed for this account' }
+        else { Gap "network.ini lists switches but an SNMP library is missing (it needs both pysnmp and cryptography) - $netFix" }
     }
 } elseif (Test-Path $credFile) {
     Note 'a network credential is saved, but network.ini lists no switches - the network check is off until it does'

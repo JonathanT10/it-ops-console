@@ -482,6 +482,10 @@ if ($python) {
     }
 }
 
+# The printer and network collectors need pysnmp - and the network one also
+# needs cryptography, which pysnmp uses for SNMPv3 AES but does not install
+# (20 Oct 2026: without it every switch read "Ciphering services not
+# available"). Both are checked and installed together below.
 # The printer collector needs pysnmp. Nothing in this suite used to install it
 # or check for it, so it only ever arrived if somebody typed pip themselves -
 # and typing pip as yourself installs it for YOU. The daily refresh runs as the
@@ -531,8 +535,8 @@ function Test-PythonHasModule {
 
 if ($python) {
     # Two questions, not one: can I see it, and can an account that is not me?
-    $snmpMine    = Test-PythonHasModule $python 'pysnmp'
-    $snmpEveryone = Test-PythonHasModule $python 'pysnmp' -MachineWide
+    $snmpMine    = (Test-PythonHasModule $python 'pysnmp') -and (Test-PythonHasModule $python 'cryptography')
+    $snmpEveryone = (Test-PythonHasModule $python 'pysnmp' -MachineWide) -and (Test-PythonHasModule $python 'cryptography' -MachineWide)
 
     $elevated = $false
     if ($onWindows) {
@@ -544,30 +548,30 @@ if ($python) {
     }
 
     if ($snmpEveryone) {
-        Write-Host '  printer support (pysnmp): installed for the whole computer'
+        Write-Host '  SNMP support (pysnmp + cryptography): installed for the whole computer'
     } elseif ($Unattended) {
         # -Unattended promises to skip install offers (see the header). Reaching
         # out to a package index is exactly the kind of thing that promise is
         # about, and on a machine with no route out it would sit there waiting.
-        Write-Host '  printer support (pysnmp): skipped - unattended setup installs nothing'
+        Write-Host '  SNMP support (pysnmp + cryptography): skipped - unattended setup installs nothing'
     } elseif ($snmpMine -and -not $elevated) {
         # The case that bit a real machine. Offering to install here would run a
         # pip that can see the per-account copy, report "already satisfied", and
         # change nothing - so do not offer; say what is actually wrong.
-        Write-Host '  printer support (pysnmp): installed for YOUR account only'
+        Write-Host '  SNMP support (pysnmp + cryptography): installed for YOUR account only'
         Write-Warning '  That is enough when you refresh by hand. It is NOT enough for the daily'
         Write-Warning '  automatic refresh, which runs as the computer and cannot see it.'
         Write-Warning '  Re-run this setup from a window opened with "Run as administrator".'
-    } elseif (Ask-YesNo '  Install printer support (pysnmp)? Needed only if you add printers' $true) {
+    } elseif (Ask-YesNo '  Install SNMP support (pysnmp + cryptography)? Needed only if you add printers or switches' $true) {
         # Elevated: hide the per-account copy first. Without this pip finds it on
         # sys.path, says "Requirement already satisfied" and writes nothing where
         # the scheduled task can reach.
         # Not elevated: --user is the only thing that will succeed, and it is
         # explicitly NOT enough for an unattended daily refresh - say so.
         $had = [Environment]::GetEnvironmentVariable('PYTHONNOUSERSITE')
-        $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', 'pysnmp>=7.1')
+        $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', 'pysnmp>=7.1', 'cryptography>=43')
         if ($elevated) { $env:PYTHONNOUSERSITE = '1' }
-        else { $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--user', 'pysnmp>=7.1') }
+        else { $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--user', 'pysnmp>=7.1', 'cryptography>=43') }
         try { & $python @pipArgs }
         finally {
             if ($elevated) {
@@ -575,22 +579,22 @@ if ($python) {
                 else { $env:PYTHONNOUSERSITE = $had }
             }
         }
-        $snmpMine     = Test-PythonHasModule $python 'pysnmp'
-        $snmpEveryone = Test-PythonHasModule $python 'pysnmp' -MachineWide
+        $snmpMine     = (Test-PythonHasModule $python 'pysnmp') -and (Test-PythonHasModule $python 'cryptography')
+        $snmpEveryone = (Test-PythonHasModule $python 'pysnmp' -MachineWide) -and (Test-PythonHasModule $python 'cryptography' -MachineWide)
         if ($snmpEveryone) {
-            Write-Host '  printer support (pysnmp): installed for the whole computer'
+            Write-Host '  SNMP support (pysnmp + cryptography): installed for the whole computer'
         } elseif ($snmpMine) {
-            Write-Host '  printer support (pysnmp): installed for YOUR account only'
+            Write-Host '  SNMP support (pysnmp + cryptography): installed for YOUR account only'
             Write-Warning '  That is enough when you refresh by hand. It is NOT enough for the daily'
             Write-Warning '  automatic refresh, which runs as the computer and cannot see it. If you'
             Write-Warning '  schedule that in step 6, re-run this setup from an Administrator window.'
         } else {
-            Write-Warning '  pysnmp did not install. Printers are optional - everything else works.'
+            Write-Warning '  pysnmp / cryptography did not install. Printers and switches are optional - everything else works.'
             Write-Warning "  To try again later, from an Administrator window:"
-            Write-Warning "    `$env:PYTHONNOUSERSITE=1; & ""$python"" -m pip install ""pysnmp>=7.1"""
+            Write-Warning "    `$env:PYTHONNOUSERSITE=1; & ""$python"" -m pip install ""pysnmp>=7.1"" ""cryptography>=43"""
         }
     } else {
-        Write-Host '  printer support (pysnmp): skipped - add it later if you add printers'
+        Write-Host '  SNMP support (pysnmp + cryptography): skipped - add it later if you add printers'
     }
 }
 

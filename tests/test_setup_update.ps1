@@ -584,6 +584,26 @@ Check 'the "your account only" wording appears only under the check that proves 
 Check 'and there is a separate line for "not installed at all"' (
     $srText -like '*pysnmp) is not installed*')
 
+# ---- SNMPv3 needs cryptography too (20 Oct 2026) ---------------------------- #
+# pysnmp does SNMPv3 AES through cryptography and does not install it. v1.8.0
+# checked and installed pysnmp alone, so check-setup said "installed" while
+# every switch failed "Ciphering services not available".
+Check 'setup installs cryptography alongside pysnmp' (
+    $setupText -like "*'pysnmp>=7.1', 'cryptography>=43')*" -and
+    $setupText -like "*Test-PythonHasModule `$python 'cryptography' -MachineWide*")
+Check 'check-setup asks for cryptography, machine-wide, for the network check' (
+    $csText -like "*Test-PythonHasModule `$py 'cryptography' -MachineWide*" -and
+    $csText -like '*""cryptography>=43""*')
+Check 'schedule-refresh asks for cryptography when switches are configured' (
+    $srText -like "*Test-PythonHasModule `$pyExe 'cryptography' -MachineWide*" -and
+    $srText -like '*network.ini*')
+# "& script" is refused where only signed scripts may run (the desktop, 20 Oct
+# 2026); the hints a person copies must use the -File form instead.
+$credText = Get-Content (Join-Path $repo 'set-network-credential.ps1') -Raw
+Check 'no printed hint runs a script with "&" - they use -ExecutionPolicy Bypass -File' (
+    $credText -notlike "*on this computer: & '*" -and $csText -notlike "*Run as administrator: & '*" -and
+    $credText -like '*-ExecutionPolicy Bypass -File*' -and $csText -like '*Bypass -File ""$(Join-Path $consoleDir*')
+
 Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($fails.Count) { Write-Host "RESULT: $($fails.Count) FAILURES"; $fails | ForEach-Object { Write-Host "  - $_" }; exit 1 }

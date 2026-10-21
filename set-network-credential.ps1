@@ -121,4 +121,5 @@ Move-Item -LiteralPath $tmp -Destination $path -Force
 Write-Host ''
 Write-Host "Saved the $Site credential, encrypted, to $path"
 Write-Host 'Only this computer can open it. The next "Refresh IT Ops Data" uses it.'
-Write-Host "To check it, on this computer: & '$(Join-Path $PSScriptRoot 'check-setup.ps1')'"
+# -File form, not "& script": "&" is refused where only signed scripts may run.
+Write-Host "To check it, on this computer: powershell -NoProfile -ExecutionPolicy Bypass -File ""$(Join-Path $PSScriptRoot 'check-setup.ps1')"""

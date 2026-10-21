@@ -147,6 +147,27 @@ def test_exit_3_writes_nothing(tmp):
           "credential" not in out.lower())
 
 
+def test_exit_3_without_cryptography(tmp):
+    """20 Oct 2026, first live run: pysnmp was installed, cryptography was not.
+    pysnmp does its AES through cryptography but does not install it, so every
+    poll failed with 'Ciphering services not available' and every switch was
+    filed as unreachable. That is a missing library, and must read as one."""
+    d = os.path.join(tmp, "e3c")
+    fake = os.path.join(d, "fake")
+    os.makedirs(os.path.join(fake, "cryptography"))
+    write(os.path.join(fake, "cryptography", "__init__.py"),
+          "raise ImportError('no cryptography here')\n")
+    cfg, db = os.path.join(d, "network.ini"), os.path.join(d, "network.db")
+    write(cfg, ini([("Core", "192.0.2.2")]))
+    rc, out = run(["--config", cfg, "--db", db, "--test-mode"],
+                  env_extra={ENV: json.dumps({"dfw": {"user": USER, "password": PASSWORD}})},
+                  pythonpath=fake)
+    check("cryptography: missing it exits 3, like a missing SNMP library", rc == 3)
+    check("cryptography: ... with no database created", not os.path.exists(db))
+    check("cryptography: ... never calling a switch unreachable", "unreachable" not in out.lower())
+    check("cryptography: ... and the fix names it", '"cryptography>=43"' in out)
+
+
 def test_exit_4_writes_nothing(tmp):
     d = os.path.join(tmp, "e4")
     os.makedirs(d)
@@ -251,6 +272,16 @@ def test_unreachable_vs_not_checked(tmp):
     rc, db, _ = _main_with(tmp, "lib", [("A", "192.0.2.1"), ("B", "192.0.2.6")],
                            {"192.0.2.1": up, "192.0.2.6": ImportError("gone mid-run")})
     check("sorting: the library failing part-way -> exit 3, that device not recorded",
+          rc == 3 and [row[1] for row in rows(db)["devices"]] == ["192.0.2.1"])
+
+    class EncryptionError(Exception):
+        """Stands in for pysnmp's errind.EncryptionError (matched by name)."""
+    gone = collector._indication(EncryptionError("Ciphering services not available"))
+    check("sorting: pysnmp unable to encrypt is a library fault, not a down device",
+          isinstance(gone, ImportError) and not isinstance(gone, collector.Unreachable))
+    rc, db, _ = _main_with(tmp, "cipher", [("A", "192.0.2.1"), ("B", "192.0.2.7")],
+                           {"192.0.2.1": up, "192.0.2.7": gone})
+    check("sorting: ... so that device exits 3 and is not recorded (not marked down)",
           rc == 3 and [row[1] for row in rows(db)["devices"]] == ["192.0.2.1"])
 
 
@@ -434,6 +465,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         test_single_import_site()
         test_exit_3_writes_nothing(tmp)
+        test_exit_3_without_cryptography(tmp)
         test_exit_4_writes_nothing(tmp)
         test_unreachable_vs_not_checked(tmp)
         test_deadline_and_pool(tmp)

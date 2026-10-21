@@ -204,7 +204,7 @@ function Get-PlainWords {
     # can check nothing at all - and, like the printers, says plainly that
     # nothing was marked down, because the next move is not "go look at a switch".
     if ($Step -eq 'network-health' -and $Detail -eq 'exit code 3') {
-        return 'The network devices were not checked at all: the check needs a piece of Python called pysnmp and the account that ran this cannot see it. Nothing was marked down and nothing was recorded - the Network page still shows the last real reading. Install pysnmp for the whole computer from a PowerShell window opened with Run as administrator; the exact command is in the run log.'
+        return 'The network devices were not checked at all: the check needs two pieces of Python, pysnmp and cryptography (pysnmp encrypts SNMPv3 with it), and the account that ran this cannot see one of them. Nothing was marked down and nothing was recorded - the Network page still shows the last real reading. Install both for the whole computer from a PowerShell window opened with Run as administrator; the exact command is in the run log.'
     }
     if ($Step -eq 'network-health' -and $Detail -eq 'exit code 4') {
         return 'The network devices were not checked at all: the saved SNMPv3 credential is missing, cannot be opened on this computer, or has nothing for one of the sites in network.ini. Nothing was marked down and nothing was recorded. On this computer, in a PowerShell window opened with Run as administrator, run set-network-credential.ps1 from the console folder and enter that site''s user and password from LastPass.'
