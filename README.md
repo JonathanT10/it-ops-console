@@ -561,7 +561,13 @@ python tests/test_notify.py
 python tests/test_apply_alerts.py
 pwsh tests/test_run_all_signin.ps1
 pwsh tests/test_schedule_refresh.ps1
+pwsh tests/test_invoke_native.ps1
 ```
+
+`test_invoke_native.ps1` pins how run-all judges a step: by its exit code
+alone. A line on stderr (a Python warning, say) is logged, never a failure -
+Windows PowerShell 5.1 under `Stop` used to turn the first one into a failed
+step, which pwsh 7 does not do, so this test reproduces it with an error record.
 
 `test_network.py` (51 checks) covers the network collector: pysnmp imported in
 exactly one place; a run that can check nothing (pysnmp or cryptography

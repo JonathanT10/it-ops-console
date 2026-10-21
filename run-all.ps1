@@ -690,11 +690,26 @@ function Invoke-Native {
     $prev = Get-Location
     try {
         if ($WorkDir) { Set-Location -LiteralPath $WorkDir }
-        & $Exe @NativeArgs 2>&1 | ForEach-Object {
-            $line = "$_".TrimEnd()
-            if ($line) { Say $line; Add-StatusLine $StepKey $line }
+        # A missing program must still fail the step loudly, so find it while
+        # 'Stop' is in force (the catch below reports it).
+        $null = Get-Command $Exe -ErrorAction Stop
+        # Then 'Continue' for the run itself. Under 'Stop', Windows PowerShell 5.1
+        # turns the first line a program writes to stderr into a terminating
+        # error, so ONE harmless warning (pysnmp's CryptographyDeprecationWarning,
+        # 20 Oct 2026) failed a step that had finished and exited 0. stderr is
+        # just more of the log; the exit code alone says whether the step worked.
+        # pwsh 7 does not do this, which is why the tests never caught it.
+        $hadEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $Exe @NativeArgs 2>&1 | ForEach-Object {
+                $line = "$_".TrimEnd()
+                if ($line) { Say $line; Add-StatusLine $StepKey $line }
+            }
+            $code = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $hadEap
         }
-        $code = $LASTEXITCODE
         $sw.Stop()
         if ($code -ne 0) {
             Add-Result $Name 'FAILED' "exit code $code" $sw.Elapsed.TotalSeconds

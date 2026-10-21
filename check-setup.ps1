@@ -402,7 +402,14 @@ if (Test-Path $rsPath) {
             Gap "the last $kind ($($rs.GeneratedUtc)) could not sign in: $($rs.SignIn.Detail)"
         } else {
             if ($rs.SignIn -and @($rs.SignIn.Dropped).Count) { Note "the last $kind had to fall back: $(@($rs.SignIn.Dropped)[0])" }
-            Say "last $kind ($($rs.GeneratedUtc)): $(if ($rs.Ok) { 'everything ran' } else { 'some steps had problems - see the console overview' })"
+            # A run with failed steps is a gap, not an OK line with bad news in it
+            # (21 Oct 2026: this printed an OK line saying steps had problems, and the
+            # summary below still said "Everything looks right").
+            if ($rs.Ok) { Say "last $kind ($($rs.GeneratedUtc)): everything ran" }
+            else {
+                $bad = @(@($rs.Steps) | Where-Object { $_.Status -eq 'FAILED' } | ForEach-Object { $_.Step })
+                Gap "the last $kind ($($rs.GeneratedUtc)) had steps that did not complete$(if ($bad.Count) { ': ' + ($bad -join ', ') }) - see the console overview, or run Refresh IT Ops Data again"
+            }
         }
         if ($rs.Update) {
             if ($rs.Update.Newer -eq $true) {

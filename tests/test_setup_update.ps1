@@ -604,6 +604,12 @@ Check 'no printed hint runs a script with "&" - they use -ExecutionPolicy Bypass
     $credText -notlike "*on this computer: & '*" -and $csText -notlike "*Run as administrator: & '*" -and
     $credText -like '*-ExecutionPolicy Bypass -File*' -and $csText -like '*Bypass -File ""$(Join-Path $consoleDir*')
 
+# ---- a refresh with failed steps is a gap, not an OK line (21 Oct 2026) ---- #
+$lastRun = @($csText -split "`r?`n" | Where-Object { $_ -like '*had steps that did not complete*' })
+Check 'check-setup reports a refresh with failed steps as a Gap, naming the steps' (
+    $lastRun.Count -eq 1 -and $lastRun[0].TrimStart() -like 'Gap *' -and $lastRun[0] -like '*$bad*')
+Check 'and no longer prints "some steps had problems" on an OK line' ($csText -notlike '*some steps had problems*')
+
 Write-Host ''
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($fails.Count) { Write-Host "RESULT: $($fails.Count) FAILURES"; $fails | ForEach-Object { Write-Host "  - $_" }; exit 1 }
